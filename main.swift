@@ -10,8 +10,8 @@ struct Config: Codable, Equatable {
     var bottom = 0
     var left = 0
     var right = 0
-    var keepAspect = true   // shrink virtual screen further so it keeps `aspectPreset`
-    var aspectPreset = "16:9"   // panel | 16:9 | 16:10 | 4:3 | 21:9 | custom
+    var keepAspect = true   // ON: keep the panel's own aspect ratio. OFF: use `aspectPreset`
+    var aspectPreset = "16:9"   // free | 16:9 | 16:10 | 4:3 | 21:9 | custom  (used when keepAspect is off)
     var customW = 16.0
     var customH = 9.0
     var hiDPI = true        // virtual screen at 2x (UI looks like half the pixel size)
@@ -22,14 +22,17 @@ struct Config: Codable, Equatable {
     var panelInches = 48.0      // real diagonal of the physical panel
     var targetInches = 24.0     // diagonal to emulate in "diagonal" mode
 
-    func ratio(panelW: Int, panelH: Int) -> Double {
+    /// nil = no ratio constraint (fill the available area)
+    func effectiveRatio(panelW: Int, panelH: Int) -> Double? {
+        if keepAspect { return Double(panelW) / Double(panelH) }
         switch aspectPreset {
-        case "panel": return Double(panelW) / Double(panelH)
-        case "16:10": return 16.0 / 10.0
-        case "4:3":   return 4.0 / 3.0
-        case "21:9":  return 21.0 / 9.0
-        case "custom": return customW / max(customH, 0.001)
-        default:      return 16.0 / 9.0
+        case "free":   return nil
+        case "panel":  return Double(panelW) / Double(panelH)   // legacy saved value
+        case "16:10":  return 16.0 / 10.0
+        case "4:3":    return 4.0 / 3.0
+        case "21:9":   return 21.0 / 9.0
+        case "custom": return max(customW, 0.001) / max(customH, 0.001)
+        default:       return 16.0 / 9.0
         }
     }
 }
@@ -40,7 +43,10 @@ final class Settings: ObservableObject {
     private let key = "config.v1"
     init() {
         if let d = UserDefaults.standard.data(forKey: key),
-           let c = try? JSONDecoder().decode(Config.self, from: d) { cfg = c } else { cfg = Config() }
+           var c = try? JSONDecoder().decode(Config.self, from: d) {
+            if c.aspectPreset == "panel" { c.aspectPreset = "16:9" }
+            cfg = c
+        } else { cfg = Config() }
     }
     private func save() {
         if let d = try? JSONEncoder().encode(cfg) { UserDefaults.standard.set(d, forKey: key) }
@@ -62,8 +68,7 @@ func geometry(_ c: Config, panelW: Int, panelH: Int) -> Geometry {
         h = Int(Double(panelH) * s)
     }
     w = max(min(w, aw), 64); h = max(min(h, ah), 64)
-    if c.keepAspect {
-        let r = c.ratio(panelW: panelW, panelH: panelH)
+    if let r = c.effectiveRatio(panelW: panelW, panelH: panelH) {
         if Double(w) / Double(h) > r { w = Int(Double(h) * r) } else { h = Int(Double(w) / r) }
     }
     // Snap to multiples of 16: avoids awkward sizes (e.g. odd heights from wide ratios like 21:9)
@@ -278,10 +283,16 @@ final class Controller {
 
 // MARK: - Settings UI
 
+struct ContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 struct SettingsView: View {
     @ObservedObject var s = Settings.shared
     @State private var uniform = 0
     var onApply: () -> Void
+    var onHeight: (CGFloat) -> Void = { _ in }   // reports the full content height
 
     var summary: String {
         guard let scr = pickPhysical(s.cfg) else { return "No physical display found" }
@@ -342,17 +353,17 @@ struct SettingsView: View {
                   footer: { Text("Pixels on each edge of the physical panel that are kept black (measured in panel pixels).") }
 
                 Section {
-                    Toggle("Keep aspect ratio", isOn: $s.cfg.keepAspect)
+                    Toggle("Keep screen aspect ratio", isOn: $s.cfg.keepAspect)
                     Picker("Ratio", selection: $s.cfg.aspectPreset) {
-                        Text("Match panel").tag("panel")
+                        Text("None (fill area)").tag("free")
                         Text("16:9").tag("16:9")
                         Text("16:10").tag("16:10")
                         Text("4:3").tag("4:3")
                         Text("21:9").tag("21:9")
                         Text("Custom").tag("custom")
                     }
-                    .disabled(!s.cfg.keepAspect)
-                    if s.cfg.aspectPreset == "custom" && s.cfg.keepAspect {
+                    .disabled(s.cfg.keepAspect)
+                    if s.cfg.aspectPreset == "custom" && !s.cfg.keepAspect {
                         LabeledContent("Custom ratio") {
                             HStack(spacing: 6) {
                                 TextField("", value: $s.cfg.customW, format: .number)
@@ -366,7 +377,11 @@ struct SettingsView: View {
                         }
                     }
                 } header: { Text("Aspect ratio") }
-                  footer: { Text("When on, extra black is added on the other edges so the image keeps this shape.") }
+                  footer: {
+                    Text(s.cfg.keepAspect
+                         ? "On: the image keeps your screen's own shape. Extra black is added on the other edges as needed."
+                         : "Off: choose any ratio. Extra black is added on the other edges so the image has that shape.")
+                }
 
                 Section {
                     Toggle("HiDPI (2×)", isOn: $s.cfg.hiDPI)
@@ -391,8 +406,12 @@ struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            .background(GeometryReader { g in
+                Color.clear.preference(key: ContentHeightKey.self, value: g.size.height)
+            })
         }
-        .frame(minWidth: 520, minHeight: 560)
+        .frame(minWidth: 520, minHeight: 200)
+        .onPreferenceChange(ContentHeightKey.self) { onHeight($0) }
     }
 
     func intRow(_ title: String, _ v: Binding<Int>, unit: String = "px") -> some View {
@@ -424,6 +443,9 @@ struct SettingsView: View {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var item: NSStatusItem!
     var settingsWindow: NSWindow?
+    var settingsContentHeight: CGFloat = 0
+    var userResizedSettings = false
+    var settingsNeedsCenter = true
     var debounce: DispatchWorkItem?
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -477,17 +499,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func openSettings() {
         if settingsWindow == nil {
-            let host = NSHostingView(rootView: SettingsView(onApply: { Controller.shared.start() }))
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 720),
+            let host = NSHostingView(rootView: SettingsView(
+                onApply: { Controller.shared.start() },
+                onHeight: { [weak self] h in self?.settingsContentHeightChanged(h) }))
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 600),
                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             w.title = "UsableDisplay Settings"
             w.contentView = host
             w.isReleasedWhenClosed = false
             w.center()
+            NotificationCenter.default.addObserver(forName: NSWindow.willStartLiveResizeNotification,
+                                                   object: w, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.userResizedSettings = true }
+            }
             settingsWindow = w
         }
+        userResizedSettings = false
+        settingsNeedsCenter = true
+        fitSettingsWindow()
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    func settingsContentHeightChanged(_ h: CGFloat) {
+        guard h > 100 else { return }
+        settingsContentHeight = h
+        if !userResizedSettings { fitSettingsWindow() }
+    }
+
+    /// Size the window to its full content so no scroll bar is needed,
+    /// unless the screen is too small, in which case it fills the available height and scrolls.
+    func fitSettingsWindow() {
+        guard let w = settingsWindow else { return }
+        guard settingsContentHeight > 100 else { return }   // wait for the first measurement
+        let vis = (w.screen ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+        let chrome = w.frame.height - w.contentLayoutRect.height          // title bar
+        let contentH = min(settingsContentHeight, vis.height - chrome - 24)
+        var f = w.frameRect(forContentRect: NSRect(x: 0, y: 0, width: w.contentLayoutRect.width, height: contentH))
+        if settingsNeedsCenter {
+            f.origin = NSPoint(x: vis.midX - f.width / 2, y: vis.midY - f.height / 2)
+            settingsNeedsCenter = false
+        } else {
+            f.origin = NSPoint(x: w.frame.origin.x, y: w.frame.maxY - f.height)   // keep the top edge fixed
+        }
+        f.origin.y = min(max(f.origin.y, vis.minY), vis.maxY - f.height)
+        w.setFrame(f, display: true, animate: false)
     }
 
     // Re-run automatically when the HDMI display disconnects/reconnects (e.g. TV power cycle).
