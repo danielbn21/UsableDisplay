@@ -16,7 +16,7 @@ Got a dead row of pixels along the edge of your OLED TV or monitor? UsableDispla
 
 It can also emulate a **smaller screen** on a larger panel. For example, it can make a 48″ TV behave like a 24″ or 40″ monitor by changing a number.
 
-It was built for an LG C1 48″ (3840×2160) on an M4 Mac mini running macOS 15 with a 16 px dead strip at the top. It should work with any display macOS can drive.
+It was built for an LG C1 48″ (3840×2160) on an M4 Mac mini running macOS 15 with a strip of 16 dead dead at the top. It should work with any display macOS can drive.
 
 ## How it works
 
