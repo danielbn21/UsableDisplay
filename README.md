@@ -31,7 +31,7 @@ macOS has no built-in underscan for HDMI displays, and a black bar drawn on top 
 
 - Border size in physical pixels for each edge (top, bottom, left, right).
 - Optional **screen size mode**: enter the diagonal you want (24″, 40″ and so on) and the image is scaled and centered.
-- Aspect ratio lock with presets (panel, 16:9, 16:10, 4:3, 21:9) or a custom ratio.
+- Aspect ratio: keep your screen's own shape automatically, or turn that off and pick any ratio (16:9, 16:10, 4:3, 21:9, custom, or none).
 - HiDPI (2×) or 1× virtual screen, and 30, 60 or 120 Hz refresh.
 - Live summary of the resulting virtual resolution and position.
 - Menu bar app with Enable/Disable, Re-apply and Launch at Login.
@@ -73,11 +73,11 @@ Because the build is ad-hoc signed, macOS may ask for the permission again after
 | **Mode: Border pixels** | The image fills the panel minus the borders you set. |
 | **Mode: Screen size** | The image is scaled to look like a screen of the given diagonal and centered. Borders still reserve the dead area. |
 | **Top / Bottom / Left / Right** | Pixels kept black on each edge of the physical panel. |
-| **Keep aspect ratio** | Adds extra black on the other edges so the image keeps the chosen shape. |
+| **Keep screen aspect ratio** | On: the image keeps your screen's own shape (the ratio picker is disabled). Off: pick any ratio below. Extra black is added on the other edges as needed. |
 | **HiDPI (2×)** | Sharper UI that looks half the pixel size. Turn it off for small emulated sizes, where a HiDPI UI looks very large. |
 | **Refresh rate** | Refresh rate of the virtual screen. |
 
-**Example (LG C1 48″, 16 px dead strip at the top):** set Top to 16 and leave the other sides at 0. With the aspect ratio locked to 16:9, this gives a 3810×2144 virtual screen.
+**Example (LG C1 48″, 16 px dead strip at the top):** set Top to 16 and leave the other sides at 0. With "Keep screen aspect ratio" on, this gives a 3808×2144 virtual screen.
 
 ## Known limitations
 
