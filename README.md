@@ -16,7 +16,7 @@ Got a dead row of pixels along the edge of your OLED TV or monitor? UsableDispla
 
 It can also emulate a **smaller screen** on a larger panel. For example, it can make a 48″ TV behave like a 24″ or 40″ monitor by changing a number.
 
-It was built for an LG C1 48″ (3840×2160) on an M4 Mac mini running macOS 15 with a strip of 16 dead dead at the top. It should work with any display macOS can drive.
+It was built for an LG C1 48″ (3840×2160) on an M4 Mac mini running macOS 15 with a 16 px dead strip at the top. It should work with any display macOS can drive.
 
 ## How it works
 
@@ -91,8 +91,39 @@ Because the build is ad-hoc signed, macOS may ask for the permission again after
 - **Nothing happens, or the screen stays black.** Check the Screen Recording permission, then choose **Re-apply**. To see the app's log, run `log stream --predicate 'eventMessage CONTAINS "UsableDisplay"'`.
 - **Stuck overlay.** Choose **Quit** from the menu bar icon, or run `pkill UsableDisplay`.
 - **Ghosting or double images on the TV.** Turn off motion processing on the TV (on LG OLED: TruMotion / Motion Eye Care and OLED Motion Pro), and use Game or PC mode.
+- **Green screen (or a nameless 1080p display afterwards) when the virtual screen is built.** Changing the display layout can make the HDMI link retrain, and a marginal link (for example 4K at 120 Hz over a long or non-certified cable) may fail to lock again. Set the display to **60 Hz** in System Settings → Displays before using the app, use a certified Ultra High Speed HDMI cable, and unplug and replug the cable to recover. The log (`log show --last 5m --predicate 'process == "UsableDisplay"'`) shows each stage.
+- **Display "lost" right after the virtual screen is created.** macOS hides a display that is mirroring another one from apps, so a TV that was put into a mirror set looks like it vanished. The app now logs every display (including mirror state) and switches mirroring off. The virtual display gets a new identity on every start so macOS cannot re-apply an old saved layout.
 - **Icon doesn't update after a rebuild.** Run `killall Finder` and `killall Dock`.
 - **Interface looks too large.** Turn HiDPI off in Settings.
+
+## Safety features
+
+- **No automatic retry loops.** If setting up the virtual screen fails, the app stops and shows the reason in its menu. It does not try again on its own.
+- **Start delay.** At login and after waking from sleep, the app waits (10 s by default, configurable) and checks that the physical display is really present before building anything.
+- **Display readiness check.** Before building anything, the app waits until the physical display reports a stable resolution. After adding the virtual screen it waits for the display to come back at the same resolution (the TV may need a few seconds to re-lock its signal) and finds it again by UUID, because display IDs can change.
+- **Resolution check.** The app remembers the panel resolution your settings were applied at. If an automatic start finds a different resolution, it does not build the virtual screen. Open Settings and press **Apply** to confirm the new resolution.
+- **Login timing.** At login the app waits for the Dock and Finder to be running, then for the display's resolution, refresh rate and HDR state to stay unchanged for 6 seconds. The login delay (30 s by default) and the wake delay are configurable, and automatic start can be turned off entirely.
+- **Setup stages (Troubleshooting).** Setup can be stopped after the virtual display, after the display layout, or after the black overlay, to find which step upsets a particular display or cable.
+- **Display selection.** Displays without a UUID (half-connected or virtual displays from other tools) are ignored, and "Automatic" picks the display with the most pixels. You can also choose a specific display in Settings. Every start logs the list of displays it can see.
+- **Sleep and wake.** The virtual screen is removed before the Mac sleeps and rebuilt after it wakes.
+- **Interrupted-start guard.** If a start fails, crashes or is cut short (for example by a forced power-off), the app will not start automatically next time. Choose **Re-apply** to start it again.
+- **Restore Displays (emergency)** in the menu removes the virtual screen and restores macOS's saved display layout.
+
+## Recovering from a green or blank screen
+
+If the display shows a green screen or no picture, for example after a forced reboot, you can recover it from another computer (SSH or remote desktop) or in Safe Mode:
+
+1. Stop the app and keep it from launching: `pkill UsableDisplay`, then remove it under *System Settings → General → Login Items & Extensions* (or move `UsableDisplay.app` to the Trash).
+2. Reset the saved display layout, then reboot:
+   ```bash
+   sudo rm -f /Library/Preferences/com.apple.windowserver.displays.plist
+   rm -f ~/Library/Preferences/ByHost/com.apple.windowserver.displays.*.plist
+   sudo reboot
+   ```
+   This resets display arrangement and resolution choices for all your displays.
+3. If it persists, unplug and replug the HDMI cable (or try another port), and check the TV's HDMI signal settings.
+
+To start in Safe Mode on an Apple silicon Mac: shut down, press and hold the power button until "Loading startup options" appears, select your disk, hold Shift, and click "Continue in Safe Mode". Login items don't run in Safe Mode.
 
 ## Project layout
 
