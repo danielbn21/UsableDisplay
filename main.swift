@@ -6,22 +6,22 @@ import ServiceManagement
 // MARK: - Config (everything user-tunable lives here, nothing hard-coded)
 
 struct Config: Codable, Equatable {
-    var top = 16            // dead border, in physical panel pixels
+    var top = 16            // black border, in physical panel pixels
     var bottom = 0
     var left = 0
     var right = 0
-    var keepAspect = true   // ON: keep the panel's own aspect ratio. OFF: use `aspectPreset`
-    var aspectPreset = "16:9"   // free | 16:9 | 16:10 | 4:3 | 21:9 | custom  (used when keepAspect is off)
+    var lockMode = "aspect"     // what the user locks: borders | aspect | size
+    var anchor = "topLeft"      // corner the screen is aligned to: topLeft | topRight | bottomLeft | bottomRight
+    var aspectPreset = "panel"  // panel | 16:9 | 16:10 | 4:3 | 21:9 | custom
     var customW = 16.0
     var customH = 9.0
     var hiDPI = true        // virtual screen at 2x (UI looks like half the pixel size)
     var refresh = 60
-    var displayUUID = ""    // "" = first physical display
+    var displayUUID = ""    // "" = automatic (largest display)
     var enabled = true
-    var sizeMode = "borders"    // borders | diagonal
     var panelInches = 48.0      // real diagonal of the physical panel
-    var targetInches = 24.0     // diagonal to emulate in "diagonal" mode
-    var startDelay = 10         // seconds to wait after login / wake before building the virtual screen
+    var targetInches = 24.0     // screen diagonal to emulate in the "size" lock
+    var startDelay = 10         // seconds to wait after wake before building the virtual screen
     var refW = 0                // panel resolution these settings were last applied at (0 = unknown)
     var refH = 0
     var loginDelay = 30         // seconds to wait when the app starts shortly after boot / login
@@ -29,23 +29,35 @@ struct Config: Codable, Equatable {
     var confineMouse = true     // keep the pointer on the virtual screen (stops it escaping onto the black border)
     var debugStage = 4          // 1...4: stop setup early to find a problem step; 4 = full
 
-    /// Decodes saved settings, filling keys added by newer versions with defaults,
-    /// so an app update never wipes the user's settings.
+    /// Decodes saved settings, filling keys added by newer versions with defaults and converting
+    /// settings saved before the lock model existed, so an app update never wipes the user's settings.
     static func load(from data: Data) -> Config? {
-        guard let saved = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+        guard var saved = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let defData = try? JSONEncoder().encode(Config()),
               var merged = (try? JSONSerialization.jsonObject(with: defData)) as? [String: Any] else { return nil }
+        if saved["lockMode"] == nil {
+            let keep = saved["keepAspect"] as? Bool ?? true
+            let preset = saved["aspectPreset"] as? String ?? "panel"
+            if (saved["sizeMode"] as? String) == "diagonal" {
+                saved["lockMode"] = "size"
+                if keep || preset == "free" { saved["aspectPreset"] = "panel" }
+            } else if keep {
+                saved["lockMode"] = "aspect"; saved["aspectPreset"] = "panel"
+            } else if preset == "free" {
+                saved["lockMode"] = "borders"
+            } else {
+                saved["lockMode"] = "aspect"
+            }
+        }
+        if (saved["aspectPreset"] as? String) == "free" { saved["aspectPreset"] = "panel" }
         for (k, v) in saved where merged[k] != nil { merged[k] = v }
         guard let out = try? JSONSerialization.data(withJSONObject: merged) else { return nil }
         return try? JSONDecoder().decode(Config.self, from: out)
     }
 
-    /// nil = no ratio constraint (fill the available area)
-    func effectiveRatio(panelW: Int, panelH: Int) -> Double? {
-        if keepAspect { return Double(panelW) / Double(panelH) }
+    func ratio(panelW: Int, panelH: Int) -> Double {
         switch aspectPreset {
-        case "free":   return nil
-        case "panel":  return Double(panelW) / Double(panelH)   // legacy saved value
+        case "panel":  return Double(panelW) / Double(max(panelH, 1))
         case "16:10":  return 16.0 / 10.0
         case "4:3":    return 4.0 / 3.0
         case "21:9":   return 21.0 / 9.0
@@ -60,11 +72,8 @@ final class Settings: ObservableObject {
     @Published var cfg: Config { didSet { save() } }
     private let key = "config.v1"
     init() {
-        if let d = UserDefaults.standard.data(forKey: key),
-           var c = Config.load(from: d) {
-            if c.aspectPreset == "panel" { c.aspectPreset = "16:9" }
-            cfg = c
-        } else { cfg = Config() }
+        if let d = UserDefaults.standard.data(forKey: key), let c = Config.load(from: d) { cfg = c }
+        else { cfg = Config() }
     }
     private func save() {
         if let d = try? JSONEncoder().encode(cfg) { UserDefaults.standard.set(d, forKey: key) }
@@ -73,27 +82,88 @@ final class Settings: ObservableObject {
 
 // MARK: - Geometry
 
-struct Geometry { var vw: Int; var vh: Int; var x: Int; var y: Int }  // x,y = offset from panel top-left, in pixels
+struct Geometry {
+    var pw: Int, ph: Int        // panel size in pixels
+    var vw: Int, vh: Int        // virtual screen size in pixels
+    var x: Int, y: Int          // offset of the virtual screen from the panel's top-left
+    var note: String? = nil     // a warning about the current settings, if any
 
-func geometry(_ c: Config, panelW: Int, panelH: Int) -> Geometry {
-    let aw = max(panelW - c.left - c.right, 64)
-    let ah = max(panelH - c.top - c.bottom, 64)
-    var w = aw, h = ah
-    if c.sizeMode == "diagonal" {
-        // Same pixel density as the panel, so a smaller diagonal = fewer pixels.
-        let s = min(1.0, max(c.targetInches, 1) / max(c.panelInches, 1))
-        w = Int(Double(panelW) * s)
-        h = Int(Double(panelH) * s)
-    }
-    w = max(min(w, aw), 64); h = max(min(h, ah), 64)
-    if let r = c.effectiveRatio(panelW: panelW, panelH: panelH) {
-        if Double(w) / Double(h) > r { w = Int(Double(h) * r) } else { h = Int(Double(w) / r) }
-    }
-    // Snap to multiples of 16: avoids awkward sizes (e.g. odd heights from wide ratios like 21:9)
-    // and keeps 2x HiDPI dividing cleanly.
-    w = max(w - w % 16, 64); h = max(h - h % 16, 64)
-    return Geometry(vw: w, vh: h, x: c.left + (aw - w) / 2, y: c.top + (ah - h) / 2)
+    // The black borders that result (what you actually get)
+    var borderTop: Int { y }
+    var borderLeft: Int { x }
+    var borderBottom: Int { ph - y - vh }
+    var borderRight: Int { pw - x - vw }
+    var ratio: Double { Double(vw) / Double(max(vh, 1)) }
+    // Offset of the virtual screen's center from the panel's center (+x right, +y down)
+    var centerOffsetX: Int { x + vw / 2 - pw / 2 }
+    var centerOffsetY: Int { y + vh / 2 - ph / 2 }
 }
+
+/// Works out the virtual screen from the settings.
+///  - borders: the four borders define the screen; aspect ratio and size follow.
+///  - aspect:  the borders define an area; the largest screen of the chosen ratio is placed in it, against the anchor corner.
+///  - size:    size (diagonal) and ratio are fixed; the two borders next to the anchor corner position the screen.
+func geometry(_ c: Config, panelW pw: Int, panelH ph: Int) -> Geometry {
+    let minSide = 64
+    let anchorLeft = c.anchor == "topLeft" || c.anchor == "bottomLeft"
+    let anchorTop = c.anchor == "topLeft" || c.anchor == "topRight"
+    var note: String?
+    func even(_ v: Int) -> Int { max(v - v % 2, 2) }   // even sizes keep 2x HiDPI exact
+
+    let aw = pw - c.left - c.right      // area the borders leave
+    let ah = ph - c.top - c.bottom
+    let areaW = max(aw, minSide), areaH = max(ah, minSide)
+
+    var w: Int, h: Int, x: Int, y: Int
+    switch c.lockMode {
+    case "borders":
+        if aw < 640 || ah < 360 { note = "The borders leave very little room for the screen." }
+        w = even(min(areaW, pw)); h = even(min(areaH, ph))
+        x = anchorLeft ? c.left : pw - c.right - w
+        y = anchorTop ? c.top : ph - c.bottom - h
+    case "aspect":
+        if aw < 640 || ah < 360 { note = "The borders leave very little room for the screen." }
+        let r = c.ratio(panelW: pw, panelH: ph)
+        if Double(areaW) / Double(areaH) > r { h = areaH; w = Int(Double(h) * r) }
+        else { w = areaW; h = Int(Double(w) / r) }
+        w = even(min(max(w, minSide), pw)); h = even(min(max(h, minSide), ph))
+        x = anchorLeft ? c.left : c.left + areaW - w     // aligned to the anchor corner inside the area
+        y = anchorTop ? c.top : c.top + areaH - h
+    default:   // "size"
+        let r = c.ratio(panelW: pw, panelH: ph)
+        let panelDiag = (Double(pw) * Double(pw) + Double(ph) * Double(ph)).squareRoot()
+        let d = panelDiag * max(c.targetInches, 1) / max(c.panelInches, 1)   // same pixel density as the panel
+        w = Int(d * r / (1 + r * r).squareRoot())
+        h = Int(d / (1 + r * r).squareRoot())
+        if w > pw || h > ph {
+            let f = min(Double(pw) / Double(max(w, 1)), Double(ph) / Double(max(h, 1)))
+            w = Int(Double(w) * f); h = Int(Double(h) * f)
+            note = "That screen size does not fit on the panel, so it was reduced."
+        }
+        w = even(max(w, minSide)); h = even(max(h, minSide))
+        x = anchorLeft ? c.left : pw - c.right - w
+        y = anchorTop ? c.top : ph - c.bottom - h
+        if x < 0 || y < 0 || x + w > pw || y + h > ph {
+            note = "The screen does not fit with those borders, so it was moved to fit."
+        }
+    }
+    x = min(max(x, 0), max(pw - w, 0))
+    y = min(max(y, 0), max(ph - h, 0))
+    return Geometry(pw: pw, ph: ph, vw: w, vh: h, x: x, y: y, note: note)
+}
+
+func equivalentInches(_ c: Config, _ g: Geometry) -> Double {
+    c.panelInches * hypot(Double(g.vw), Double(g.vh)) / max(hypot(Double(g.pw), Double(g.ph)), 1)
+}
+
+func ratioName(_ r: Double) -> String {
+    let known: [(String, Double)] = [("16:9", 16.0 / 9), ("16:10", 1.6), ("4:3", 4.0 / 3), ("21:9", 21.0 / 9),
+                                     ("32:9", 32.0 / 9), ("3:2", 1.5), ("5:4", 1.25), ("1:1", 1.0)]
+    if let k = known.first(where: { abs($0.1 - r) / $0.1 < 0.01 }) { return k.0 }
+    return String(format: "%.2f:1", r)
+}
+
+func signed(_ v: Int) -> String { String(format: "%+d", v) }
 
 // MARK: - Display helpers
 
@@ -437,7 +507,7 @@ final class Controller {
         // 1. Virtual display
         guard let desc = CGVirtualDisplayDescriptor() else { return fail("descriptor init failed", gen: gen) }
         desc.queue = DispatchQueue.main
-        desc.name = "Usable Area"
+        desc.name = "Usable Display"
         desc.vendorID = virtualVendorTag
         desc.productID = 0x0001
         // New identity every time, so macOS cannot re-apply a saved (possibly mirrored) layout from an earlier run
@@ -580,13 +650,12 @@ final class Controller {
 // MARK: - Settings UI
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case display, size, aspect, virtual, startup, troubleshooting
+    case display, size, virtual, startup, troubleshooting
     var id: String { rawValue }
     var title: String {
         switch self {
         case .display: return "Display"
         case .size: return "Size & Borders"
-        case .aspect: return "Aspect Ratio"
         case .virtual: return "Virtual Screen"
         case .startup: return "Startup"
         case .troubleshooting: return "Troubleshooting"
@@ -596,7 +665,6 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         switch self {
         case .display: return "display"
         case .size: return "arrow.up.left.and.arrow.down.right"
-        case .aspect: return "aspectratio"
         case .virtual: return "rectangle.on.rectangle"
         case .startup: return "power"
         case .troubleshooting: return "wrench.and.screwdriver"
@@ -606,7 +674,6 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         switch self {
         case .display: return .blue
         case .size: return .orange
-        case .aspect: return .purple
         case .virtual: return .teal
         case .startup: return .green
         case .troubleshooting: return .gray
@@ -626,7 +693,69 @@ struct SidebarIcon: View {
     }
 }
 
+/// Mini picture of the panel: black = panel, blue = the virtual screen, numbers = resulting black borders.
+struct ScreenDiagram: View {
+    let g: Geometry
+    let lock: String
+    let anchor: String
+
+    func label(_ v: Int) -> some View {
+        Text("\(v) px").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let sideW: CGFloat = 64, sideH: CGFloat = 18
+            let maxW = max(geo.size.width - 2 * sideW, 50)
+            let maxH = max(geo.size.height - 2 * sideH, 50)
+            let scale = min(maxW / CGFloat(max(g.pw, 1)), maxH / CGFloat(max(g.ph, 1)))
+            let panelW = CGFloat(g.pw) * scale, panelH = CGFloat(g.ph) * scale
+            let ox = (geo.size.width - panelW) / 2, oy = (geo.size.height - panelH) / 2
+            let rx = ox + CGFloat(g.x) * scale, ry = oy + CGFloat(g.y) * scale
+            let rw = CGFloat(g.vw) * scale, rh = CGFloat(g.vh) * scale
+            let ax = anchor.hasSuffix("Left") ? rx : rx + rw
+            let ay = anchor.hasPrefix("top") ? ry : ry + rh
+            ZStack {
+                Rectangle().fill(Color.black)
+                    .frame(width: panelW, height: panelH)
+                    .overlay(Rectangle().stroke(Color.secondary.opacity(0.7), lineWidth: 1))
+                    .position(x: ox + panelW / 2, y: oy + panelH / 2)
+                Rectangle().fill(Color.accentColor.opacity(0.35))
+                    .frame(width: rw, height: rh)
+                    .overlay(Rectangle().stroke(Color.accentColor, lineWidth: 1.5))
+                    .overlay(
+                        VStack(spacing: 1) {
+                            Text("\(g.vw) × \(g.vh)").font(.caption.weight(.semibold)).monospacedDigit()
+                            Text(ratioName(g.ratio)).font(.caption2)
+                        }
+                        .foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.5)
+                    )
+                    .position(x: rx + rw / 2, y: ry + rh / 2)
+                if lock != "borders" {
+                    Circle().fill(Color.white).frame(width: 9, height: 9)
+                        .overlay(Circle().stroke(Color.accentColor, lineWidth: 1.5))
+                        .position(x: ax, y: ay)
+                }
+                label(g.borderTop).position(x: geo.size.width / 2, y: oy - 10)
+                label(g.borderBottom).position(x: geo.size.width / 2, y: oy + panelH + 10)
+                label(g.borderLeft).position(x: ox - sideW / 2, y: geo.size.height / 2)
+                label(g.borderRight).position(x: ox + panelW + sideW / 2, y: geo.size.height / 2)
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+}
+
+struct ScreenInfo {
+    var name: String
+    var g: Geometry
+    var panelHz: Double
+    var inches: Double
+}
+
 struct SettingsView: View {
+    enum Edge { case top, bottom, left, right }
+
     @ObservedObject var s = Settings.shared
     @State private var page: SettingsPage? = .display
     @State private var uniform = 0
@@ -640,20 +769,49 @@ struct SettingsView: View {
         return a != s.cfg
     }
 
-    var summary: String {
-        guard let scr = pickPhysical(s.cfg) else { return "No physical display found" }
-        let (pw, ph) = nativePixels(screenID(scr))
+    var info: ScreenInfo? {
+        guard let scr = pickPhysical(s.cfg) else { return nil }
+        let id = screenID(scr)
+        let (pw, ph) = nativePixels(id)
         let g = geometry(s.cfg, panelW: pw, panelH: ph)
-        let eq = String(format: "%.1f", s.cfg.panelInches * Double(g.vw) / Double(pw))
-        return "Display:          \(scr.localizedName)\nPhysical panel:   \(pw) × \(ph) px\nVirtual screen:   \(g.vw) × \(g.vh) px\nPosition:         \(g.x) px from left, \(g.y) px from top\nEquivalent size:  ≈ \(eq) inch"
+        return ScreenInfo(name: scr.localizedName, g: g,
+                          panelHz: CGDisplayCopyDisplayMode(id)?.refreshRate ?? 0,
+                          inches: equivalentInches(s.cfg, g))
+    }
+
+    func refreshText(_ i: ScreenInfo) -> String {
+        var t = "\(s.cfg.refresh) Hz"
+        let tv = Int(i.panelHz.rounded())
+        if tv > 0 && tv != s.cfg.refresh { t += " (TV runs at \(tv) Hz)" }
+        return t
     }
 
     var oneLine: String {
-        guard let scr = pickPhysical(s.cfg) else { return "No physical display found" }
-        let (pw, ph) = nativePixels(screenID(scr))
-        let g = geometry(s.cfg, panelW: pw, panelH: ph)
-        let eq = String(format: "%.1f", s.cfg.panelInches * Double(g.vw) / Double(pw))
-        return "\(pw)×\(ph) panel  →  \(g.vw)×\(g.vh) virtual screen  ·  ≈ \(eq) inch"
+        guard let i = info else { return "No physical display found" }
+        let g = i.g
+        let hidpi = s.cfg.hiDPI ? "HiDPI on (UI looks like \(g.vw / 2)×\(g.vh / 2))" : "HiDPI off"
+        return [
+            "\(g.pw)×\(g.ph) panel → \(g.vw)×\(g.vh) virtual screen",
+            "≈ \(String(format: "%.1f", i.inches)) inch",
+            refreshText(i),
+            hidpi,
+            "center offset \(signed(g.centerOffsetX)), \(signed(g.centerOffsetY)) px"
+        ].joined(separator: "  ·  ")
+    }
+
+    var summary: String {
+        guard let i = info else { return "No physical display found" }
+        let g = i.g
+        return """
+        Display:          \(i.name)
+        Physical panel:   \(g.pw) × \(g.ph) px
+        Virtual screen:   \(g.vw) × \(g.vh) px  (\(ratioName(g.ratio)))
+        Position:         \(g.x) px from left, \(g.y) px from top
+        Center offset:    \(signed(g.centerOffsetX)), \(signed(g.centerOffsetY)) px  (x, y)
+        Refresh rate:     \(refreshText(i))
+        HiDPI:            \(s.cfg.hiDPI ? "on, UI looks like \(g.vw / 2) × \(g.vh / 2)" : "off")
+        Equivalent size:  ≈ \(String(format: "%.1f", i.inches)) inch
+        """
     }
 
     var body: some View {
@@ -691,8 +849,8 @@ struct SettingsView: View {
             HStack(spacing: 12) {
                 Text(oneLine)
                     .font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.tail)
-                Spacer()
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
                 if pending {
                     Text("Changes not applied yet").font(.caption).foregroundStyle(.orange)
                 }
@@ -707,7 +865,7 @@ struct SettingsView: View {
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
         }
-        .frame(minWidth: 700, minHeight: 480)
+        .frame(minWidth: 700, minHeight: 420)
     }
 
     // MARK: Pages
@@ -717,7 +875,6 @@ struct SettingsView: View {
         switch p {
         case .display: displayPage
         case .size: sizePage
-        case .aspect: aspectPage
         case .virtual: virtualPage
         case .startup: startupPage
         case .troubleshooting: troubleshootingPage
@@ -743,75 +900,183 @@ struct SettingsView: View {
         } header: { Text("Current result") }
     }
 
+    // MARK: Size & Borders
+
+    var lockHelp: String {
+        switch s.cfg.lockMode {
+        case "borders": return "You set the four borders. The screen size and aspect ratio are calculated from them."
+        case "size": return "You set the screen size and aspect ratio. Only the two borders next to the chosen corner are used, to position the screen. The other two are calculated."
+        default: return "You set the aspect ratio. The borders mark the area the screen may use, and the largest screen of that ratio is placed in it, against the chosen corner."
+        }
+    }
+
+    var bordersHeader: String {
+        s.cfg.lockMode == "size" ? "Position (borders)" : "Black borders"
+    }
+
+    var bordersFooter: String {
+        guard let g = info?.g else { return "" }
+        switch s.cfg.lockMode {
+        case "borders": return "Pixels on each edge of the panel that stay black."
+        case "size": return "The borders next to the chosen corner position the screen. The other two (greyed) are calculated."
+        default: return "These borders mark the area the screen may use. Resulting black borders: top \(g.borderTop), bottom \(g.borderBottom), left \(g.borderLeft), right \(g.borderRight) px."
+        }
+    }
+
     @ViewBuilder var sizePage: some View {
         Section {
-            Picker("Mode", selection: $s.cfg.sizeMode) {
-                Text("Border pixels").tag("borders")
-                Text("Screen size").tag("diagonal")
+            if let i = info {
+                ScreenDiagram(g: i.g, lock: s.cfg.lockMode, anchor: s.cfg.anchor)
+                    .frame(height: 170)
+                if let n = i.g.note {
+                    Label(n, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            } else {
+                Text("No physical display found").foregroundStyle(.secondary)
+            }
+        } header: { Text("Preview") }
+
+        Section {
+            Picker("Lock", selection: $s.cfg.lockMode) {
+                Text("Borders").tag("borders")
+                Text("Aspect ratio").tag("aspect")
+                Text("Size").tag("size")
             }
             .pickerStyle(.segmented)
-            if s.cfg.sizeMode == "diagonal" {
-                dblRow("Emulated screen diagonal", $s.cfg.targetInches, unit: "inch")
-            }
-        } header: { Text("Image size") }
-          footer: {
-            Text(s.cfg.sizeMode == "diagonal"
-                 ? "The image is shrunk to look like a screen of this size and centered on the panel."
-                 : "The image fills the panel minus the black borders set below.")
-        }
+        } header: { Text("What stays fixed") }
+          footer: { Text(lockHelp) }
 
         Section {
-            intRow("Top", $s.cfg.top)
-            intRow("Bottom", $s.cfg.bottom)
-            intRow("Left", $s.cfg.left)
-            intRow("Right", $s.cfg.right)
-            LabeledContent("Set all sides") {
-                HStack(spacing: 6) {
-                    TextField("", value: $uniform, format: .number)
-                        .labelsHidden().textFieldStyle(.roundedBorder)
-                        .multilineTextAlignment(.trailing).frame(width: 80)
-                    Text("px").foregroundStyle(.secondary).frame(width: 30, alignment: .leading)
-                    Button("Set") {
-                        s.cfg.top = uniform; s.cfg.bottom = uniform
-                        s.cfg.left = uniform; s.cfg.right = uniform
+            if s.cfg.lockMode == "borders" {
+                LabeledContent("Aspect ratio (calculated)") {
+                    if let g = info?.g {
+                        Text("\(ratioName(g.ratio))  (\(String(format: "%.3f", g.ratio)) : 1)").foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                Picker("Aspect ratio", selection: $s.cfg.aspectPreset) {
+                    Text("Match panel").tag("panel")
+                    Text("16:9").tag("16:9")
+                    Text("16:10").tag("16:10")
+                    Text("4:3").tag("4:3")
+                    Text("21:9").tag("21:9")
+                    Text("Custom").tag("custom")
+                }
+                if s.cfg.aspectPreset == "custom" {
+                    LabeledContent("Custom ratio") {
+                        HStack(spacing: 6) {
+                            TextField("", value: $s.cfg.customW, format: .number)
+                                .labelsHidden().textFieldStyle(.roundedBorder)
+                                .multilineTextAlignment(.trailing).frame(width: 60)
+                            Text(":")
+                            TextField("", value: $s.cfg.customH, format: .number)
+                                .labelsHidden().textFieldStyle(.roundedBorder)
+                                .multilineTextAlignment(.trailing).frame(width: 60)
+                        }
                     }
                 }
             }
-        } header: { Text(s.cfg.sizeMode == "diagonal" ? "Dead-pixel reserve" : "Black border") }
-          footer: { Text("Pixels on each edge of the physical panel that are kept black (measured in panel pixels).") }
-    }
-
-    @ViewBuilder var aspectPage: some View {
-        Section {
-            Toggle("Keep screen aspect ratio", isOn: $s.cfg.keepAspect)
-            Picker("Ratio", selection: $s.cfg.aspectPreset) {
-                Text("None (fill area)").tag("free")
-                Text("16:9").tag("16:9")
-                Text("16:10").tag("16:10")
-                Text("4:3").tag("4:3")
-                Text("21:9").tag("21:9")
-                Text("Custom").tag("custom")
+            if s.cfg.lockMode == "size" {
+                dblRow("Screen diagonal", $s.cfg.targetInches, unit: "inch")
+            } else if let i = info {
+                LabeledContent("Screen size (calculated)") {
+                    Text("\(i.g.vw) × \(i.g.vh) px  ·  ≈ \(String(format: "%.1f", i.inches)) inch").foregroundStyle(.secondary)
+                }
             }
-            .disabled(s.cfg.keepAspect)
-            if s.cfg.aspectPreset == "custom" && !s.cfg.keepAspect {
-                LabeledContent("Custom ratio") {
+            if s.cfg.lockMode != "borders" {
+                Picker("Align to corner", selection: $s.cfg.anchor) {
+                    Text("Top left").tag("topLeft")
+                    Text("Top right").tag("topRight")
+                    Text("Bottom left").tag("bottomLeft")
+                    Text("Bottom right").tag("bottomRight")
+                }
+            }
+        } header: { Text("Shape and size") }
+
+        Section {
+            Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 10) {
+                GridRow { borderCell("Top", .top); borderCell("Bottom", .bottom) }
+                GridRow { borderCell("Left", .left); borderCell("Right", .right) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if s.cfg.lockMode != "size" {
+                LabeledContent("Set all sides") {
                     HStack(spacing: 6) {
-                        TextField("", value: $s.cfg.customW, format: .number)
+                        TextField("", value: $uniform, format: .number)
                             .labelsHidden().textFieldStyle(.roundedBorder)
-                            .multilineTextAlignment(.trailing).frame(width: 60)
-                        Text(":")
-                        TextField("", value: $s.cfg.customH, format: .number)
-                            .labelsHidden().textFieldStyle(.roundedBorder)
-                            .multilineTextAlignment(.trailing).frame(width: 60)
+                            .multilineTextAlignment(.trailing).frame(width: 72)
+                        Text("px").foregroundStyle(.secondary)
+                        Button("Set") {
+                            s.cfg.top = uniform; s.cfg.bottom = uniform
+                            s.cfg.left = uniform; s.cfg.right = uniform
+                        }
                     }
                 }
             }
-        } footer: {
-            Text(s.cfg.keepAspect
-                 ? "On: the image keeps your screen's own shape. Extra black is added on the other edges as needed."
-                 : "Off: choose any ratio. Extra black is added on the other edges so the image has that shape.")
+        } header: { Text(bordersHeader) }
+          footer: { Text(bordersFooter) }
+    }
+
+    func edgeBinding(_ e: Edge) -> Binding<Int> {
+        Binding(
+            get: {
+                switch e {
+                case .top: return s.cfg.top
+                case .bottom: return s.cfg.bottom
+                case .left: return s.cfg.left
+                case .right: return s.cfg.right
+                }
+            },
+            set: { v in
+                switch e {
+                case .top: s.cfg.top = v
+                case .bottom: s.cfg.bottom = v
+                case .left: s.cfg.left = v
+                case .right: s.cfg.right = v
+                }
+            })
+    }
+
+    /// In the "size" lock only the two borders next to the anchor corner are inputs; the others are calculated.
+    func editable(_ e: Edge) -> Bool {
+        guard s.cfg.lockMode == "size" else { return true }
+        let leftAnchor = s.cfg.anchor.hasSuffix("Left"), topAnchor = s.cfg.anchor.hasPrefix("top")
+        switch e {
+        case .left: return leftAnchor
+        case .right: return !leftAnchor
+        case .top: return topAnchor
+        case .bottom: return !topAnchor
         }
     }
+
+    func resulting(_ e: Edge) -> Int {
+        guard let g = info?.g else { return 0 }
+        switch e {
+        case .top: return g.borderTop
+        case .bottom: return g.borderBottom
+        case .left: return g.borderLeft
+        case .right: return g.borderRight
+        }
+    }
+
+    @ViewBuilder
+    func borderCell(_ title: String, _ e: Edge) -> some View {
+        HStack(spacing: 8) {
+            Text(title).frame(width: 56, alignment: .leading)
+            if editable(e) {
+                TextField("", value: edgeBinding(e), format: .number)
+                    .labelsHidden().textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing).frame(width: 72)
+            } else {
+                Text("\(resulting(e))").monospacedDigit().foregroundStyle(.secondary)
+                    .frame(width: 72, alignment: .trailing)
+            }
+            Text("px").foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Other pages
 
     @ViewBuilder var virtualPage: some View {
         Section {
@@ -958,15 +1223,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openSettings() {
         if settingsWindow == nil {
             let host = NSHostingView(rootView: SettingsView(onApply: { Controller.shared.start() }))
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540),
+            let vis = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: min(820, vis.width - 40), height: min(800, vis.height - 80)),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
                              backing: .buffered, defer: false)
             w.title = "UsableArea Settings"
             w.contentView = host
-            w.contentMinSize = NSSize(width: 700, height: 480)
+            w.contentMinSize = NSSize(width: 700, height: 420)
             w.isReleasedWhenClosed = false
-            if !w.setFrameUsingName("UsableAreaSettings") { w.center() }
-            _ = w.setFrameAutosaveName("UsableAreaSettings")
+            if !w.setFrameUsingName("UsableAreaSettings2") { w.center() }
+            _ = w.setFrameAutosaveName("UsableAreaSettings2")
             settingsWindow = w
         }
         NSApp.activate(ignoringOtherApps: true)
