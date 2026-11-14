@@ -79,7 +79,7 @@ The page shows a preview and one choice, **what stays fixed**. Everything else i
 | **Aspect ratio** | the ratio, plus the borders as margins | the largest screen of that ratio that fits inside the margins, placed against the chosen corner |
 | **Size** | screen diagonal and aspect ratio, plus the two borders next to the chosen corner | the other two borders |
 
-In the **Aspect ratio** and **Size** locks you also choose the corner the screen is aligned to (top left by default).
+In the **Aspect ratio** and **Size** locks you also choose what the screen is aligned to: a corner (top left by default) or **Center**, which centers the screen in the area the borders leave.
 
 | Other settings | Meaning |
 |---|---|

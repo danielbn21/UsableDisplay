@@ -101,12 +101,14 @@ struct Geometry {
 
 /// Works out the virtual screen from the settings.
 ///  - borders: the four borders define the screen; aspect ratio and size follow.
-///  - aspect:  the borders define an area; the largest screen of the chosen ratio is placed in it, against the anchor corner.
-///  - size:    size (diagonal) and ratio are fixed; the two borders next to the anchor corner position the screen.
+///  - aspect:  the borders define an area; the largest screen of the chosen ratio is placed in it, against the anchor corner or centered.
+///  - size:    size (diagonal) and ratio are fixed; the two borders next to the anchor corner position the screen
+///             (with center, the four borders define an area and the screen is centered in it).
 func geometry(_ c: Config, panelW pw: Int, panelH ph: Int) -> Geometry {
     let minSide = 64
-    let anchorLeft = c.anchor == "topLeft" || c.anchor == "bottomLeft"
-    let anchorTop = c.anchor == "topLeft" || c.anchor == "topRight"
+    let isCenter = c.anchor == "center"
+    let anchorLeft = isCenter || c.anchor == "topLeft" || c.anchor == "bottomLeft"   // (the Borders lock treats center as top left)
+    let anchorTop = isCenter || c.anchor == "topLeft" || c.anchor == "topRight"
     var note: String?
     func even(_ v: Int) -> Int { max(v - v % 2, 2) }   // even sizes keep 2x HiDPI exact
 
@@ -127,8 +129,9 @@ func geometry(_ c: Config, panelW pw: Int, panelH ph: Int) -> Geometry {
         if Double(areaW) / Double(areaH) > r { h = areaH; w = Int(Double(h) * r) }
         else { w = areaW; h = Int(Double(w) / r) }
         w = even(min(max(w, minSide), pw)); h = even(min(max(h, minSide), ph))
-        x = anchorLeft ? c.left : c.left + areaW - w     // aligned to the anchor corner inside the area
-        y = anchorTop ? c.top : c.top + areaH - h
+        // aligned to the anchor corner, or centered, inside the area the borders leave
+        x = isCenter ? c.left + (areaW - w) / 2 : (anchorLeft ? c.left : c.left + areaW - w)
+        y = isCenter ? c.top + (areaH - h) / 2 : (anchorTop ? c.top : c.top + areaH - h)
     default:   // "size"
         let r = c.ratio(panelW: pw, panelH: ph)
         let panelDiag = (Double(pw) * Double(pw) + Double(ph) * Double(ph)).squareRoot()
@@ -141,8 +144,8 @@ func geometry(_ c: Config, panelW pw: Int, panelH ph: Int) -> Geometry {
             note = "That screen size does not fit on the panel, so it was reduced."
         }
         w = even(max(w, minSide)); h = even(max(h, minSide))
-        x = anchorLeft ? c.left : pw - c.right - w
-        y = anchorTop ? c.top : ph - c.bottom - h
+        x = isCenter ? c.left + (areaW - w) / 2 : (anchorLeft ? c.left : pw - c.right - w)
+        y = isCenter ? c.top + (areaH - h) / 2 : (anchorTop ? c.top : ph - c.bottom - h)
         if x < 0 || y < 0 || x + w > pw || y + h > ph {
             note = "The screen does not fit with those borders, so it was moved to fit."
         }
@@ -452,6 +455,42 @@ final class Controller {
         a.runModal()
     }
 
+    private var runNote = ""
+
+    private func makeVirtualDisplay(_ g: Geometry, hiDPI: Bool, maxW: Int, maxH: Int, refresh: Int) -> CGVirtualDisplay? {
+        guard let desc = CGVirtualDisplayDescriptor() else { return nil }
+        desc.queue = DispatchQueue.main
+        desc.name = "Usable Display"
+        desc.vendorID = virtualVendorTag
+        desc.productID = 0x0001
+        // New identity every time, so macOS cannot re-apply a saved (possibly mirrored) layout from an earlier run
+        desc.serialNum = UInt32.random(in: 1...0x0FFF_FFFF)
+        desc.maxPixelsWide = UInt32(maxW)
+        desc.maxPixelsHigh = UInt32(maxH)
+        desc.sizeInMillimeters = CGSize(width: 25.4 * Double(g.vw) / 110.0, height: 25.4 * Double(g.vh) / 110.0)
+        guard let vd = CGVirtualDisplay(descriptor: desc) else { return nil }
+        let div = hiDPI ? 2 : 1
+        let settings = CGVirtualDisplaySettings()
+        settings.hiDPI = hiDPI ? 1 : 0
+        settings.modes = [CGVirtualDisplayMode(width: UInt32(g.vw / div), height: UInt32(g.vh / div),
+                                               refreshRate: Double(refresh))]
+        guard vd.apply(settings) else { return nil }
+        return vd
+    }
+
+    /// NSScreen hides a display that is mirroring another one, so also look at the online display list
+    /// and switch mirroring off if the new display is hidden.
+    private func waitForVirtualScreen(_ vd: CGVirtualDisplay, seconds: Int) async -> NSScreen? {
+        for i in 0..<(seconds * 10) {
+            if let s = NSScreen.screens.first(where: { screenID($0) == vd.displayID }) { return s }
+            if i >= 5 && i % 10 == 5, onlineDisplayIDs().contains(vd.displayID), breakMirrorSets() {
+                log("the virtual display was hidden in a mirror set; mirroring switched off")
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return nil
+    }
+
     private func run(_ cfg: Config, gen: Int) async {
         for line in describeOnlineDisplays() { log("online (start): \(line)") }
         if breakMirrorSets() {
@@ -504,41 +543,41 @@ final class Controller {
         let g = geometry(cfg, panelW: pw, panelH: ph)
         lastAttempt = "\(g.vw)×\(g.vh) on a \(pw)×\(ph) panel, HiDPI \(cfg.hiDPI ? "on" : "off"), \(cfg.refresh) Hz"
 
-        // 1. Virtual display
-        guard let desc = CGVirtualDisplayDescriptor() else { return fail("descriptor init failed", gen: gen) }
-        desc.queue = DispatchQueue.main
-        desc.name = "Usable Display"
-        desc.vendorID = virtualVendorTag
-        desc.productID = 0x0001
-        // New identity every time, so macOS cannot re-apply a saved (possibly mirrored) layout from an earlier run
-        desc.serialNum = UInt32.random(in: 1...0x0FFF_FFFF)
-        desc.maxPixelsWide = UInt32(g.vw)
-        desc.maxPixelsHigh = UInt32(g.vh)
-        desc.sizeInMillimeters = CGSize(width: 25.4 * Double(g.vw) / 110.0, height: 25.4 * Double(g.vh) / 110.0)
-        guard let vd = CGVirtualDisplay(descriptor: desc) else { return fail("virtual display init failed", gen: gen) }
-        let div = cfg.hiDPI ? 2 : 1
-        let settings = CGVirtualDisplaySettings()
-        settings.hiDPI = cfg.hiDPI ? 1 : 0
-        settings.modes = [CGVirtualDisplayMode(width: UInt32(g.vw / div), height: UInt32(g.vh / div),
-                                               refreshRate: Double(cfg.refresh))]
-        guard vd.apply(settings) else { return fail("applySettings failed", gen: gen) }
-        vdisplay = vd
-
-        // 2. Wait for macOS to publish it. NSScreen hides a display that is mirroring another one,
-        //    so also look at the online display list and switch mirroring off if the new display is hidden.
+        // 1+2. Create the virtual display and wait for macOS to publish it. macOS has refused some shapes
+        //      (very wide ones, in our tests), so if the first try does not appear, try again with other parameters.
+        runNote = ""
+        var attempts: [(name: String, hiDPI: Bool, maxW: Int, maxH: Int)] = [
+            ("as requested", cfg.hiDPI, g.vw, g.vh),
+            ("larger maximum size", cfg.hiDPI, max(g.vw, pw), max(g.vh, ph))
+        ]
+        if cfg.hiDPI { attempts.append(("without HiDPI", false, max(g.vw, pw), max(g.vh, ph))) }
+        var created: CGVirtualDisplay?
         var vScreen: NSScreen?
-        for i in 0..<60 {
-            vScreen = NSScreen.screens.first { screenID($0) == vd.displayID }
-            if vScreen != nil { break }
-            if i >= 5 && i % 10 == 5, onlineDisplayIDs().contains(vd.displayID), breakMirrorSets() {
-                log("stage 1: the virtual display was hidden in a mirror set; mirroring switched off")
+        for (n, att) in attempts.enumerated() {
+            guard gen == generation else { return }
+            if n > 0 {
+                vdisplay = nil                                   // remove the previous attempt first
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard let d = makeVirtualDisplay(g, hiDPI: att.hiDPI, maxW: att.maxW, maxH: att.maxH, refresh: cfg.refresh) else {
+                log("virtual display attempt '\(att.name)': macOS refused the settings")
+                continue
+            }
+            vdisplay = d
+            if let s = await waitForVirtualScreen(d, seconds: 5) {
+                created = d; vScreen = s
+                if att.hiDPI != cfg.hiDPI { runNote = "HiDPI is off: macOS refused the HiDPI mode for this shape" }
+                log("virtual display attempt '\(att.name)' worked (\(g.vw)×\(g.vh), HiDPI \(att.hiDPI))")
+                break
+            }
+            log("virtual display attempt '\(att.name)' did not appear")
         }
         if vScreen == nil {
             for line in describeOnlineDisplays() { log("online (virtual display missing): \(line)") }
         }
-        guard gen == generation, let vs = vScreen else { return fail("virtual display never appeared", gen: gen) }
+        guard gen == generation, let vd = created, let vs = vScreen else {
+            return fail("virtual display never appeared (tried \(attempts.count) variants)", gen: gen)
+        }
         log("stage 1 ok: virtual display present")
         for line in describeOnlineDisplays() { log("online (after virtual display): \(line)") }
         if breakMirrorSets() {
@@ -638,7 +677,7 @@ final class Controller {
                     Settings.shared.cfg.refH = ph
                 }
                 UserDefaults.standard.set(false, forKey: blockedKey)
-                setStatus("Running")
+                setStatus(runNote.isEmpty ? "Running" : "Running (\(runNote))")
                 log("stage 4 ok: capturing")
             } else { try? await st.stopCapture() }
         } catch {
@@ -713,8 +752,8 @@ struct ScreenDiagram: View {
             let ox = (geo.size.width - panelW) / 2, oy = (geo.size.height - panelH) / 2
             let rx = ox + CGFloat(g.x) * scale, ry = oy + CGFloat(g.y) * scale
             let rw = CGFloat(g.vw) * scale, rh = CGFloat(g.vh) * scale
-            let ax = anchor.hasSuffix("Left") ? rx : rx + rw
-            let ay = anchor.hasPrefix("top") ? ry : ry + rh
+            let ax = anchor == "center" ? rx + rw / 2 : (anchor.hasSuffix("Left") ? rx : rx + rw)
+            let ay = anchor == "center" ? ry + rh / 2 : (anchor.hasPrefix("top") ? ry : ry + rh)
             ZStack {
                 Rectangle().fill(Color.black)
                     .frame(width: panelW, height: panelH)
@@ -905,20 +944,21 @@ struct SettingsView: View {
     var lockHelp: String {
         switch s.cfg.lockMode {
         case "borders": return "You set the four borders. The screen size and aspect ratio are calculated from them."
-        case "size": return "You set the screen size and aspect ratio. Only the two borders next to the chosen corner are used, to position the screen. The other two are calculated."
-        default: return "You set the aspect ratio. The borders mark the area the screen may use, and the largest screen of that ratio is placed in it, against the chosen corner."
+        case "size": return "You set the screen size and aspect ratio. Only the two borders next to the chosen corner are used, to position the screen, and the other two are calculated. With Center, all four borders mark an area and the screen is centered in it."
+        default: return "You set the aspect ratio. The borders mark the area the screen may use, and the largest screen of that ratio is placed in it, against the chosen corner or centered."
         }
     }
 
     var bordersHeader: String {
-        s.cfg.lockMode == "size" ? "Position (borders)" : "Black borders"
+        s.cfg.lockMode == "size" && s.cfg.anchor != "center" ? "Position (borders)" : "Black borders"
     }
 
     var bordersFooter: String {
         guard let g = info?.g else { return "" }
         switch s.cfg.lockMode {
         case "borders": return "Pixels on each edge of the panel that stay black."
-        case "size": return "The borders next to the chosen corner position the screen. The other two (greyed) are calculated."
+        case "size" where s.cfg.anchor != "center":
+            return "The borders next to the chosen corner position the screen. The other two (greyed) are calculated."
         default: return "These borders mark the area the screen may use. Resulting black borders: top \(g.borderTop), bottom \(g.borderBottom), left \(g.borderLeft), right \(g.borderRight) px."
         }
     }
@@ -985,7 +1025,8 @@ struct SettingsView: View {
                 }
             }
             if s.cfg.lockMode != "borders" {
-                Picker("Align to corner", selection: $s.cfg.anchor) {
+                Picker("Align to", selection: $s.cfg.anchor) {
+                    Text("Center").tag("center")
                     Text("Top left").tag("topLeft")
                     Text("Top right").tag("topRight")
                     Text("Bottom left").tag("bottomLeft")
@@ -1000,7 +1041,7 @@ struct SettingsView: View {
                 GridRow { borderCell("Left", .left); borderCell("Right", .right) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if s.cfg.lockMode != "size" {
+            if s.cfg.lockMode != "size" || s.cfg.anchor == "center" {
                 LabeledContent("Set all sides") {
                     HStack(spacing: 6) {
                         TextField("", value: $uniform, format: .number)
@@ -1040,7 +1081,7 @@ struct SettingsView: View {
 
     /// In the "size" lock only the two borders next to the anchor corner are inputs; the others are calculated.
     func editable(_ e: Edge) -> Bool {
-        guard s.cfg.lockMode == "size" else { return true }
+        guard s.cfg.lockMode == "size", s.cfg.anchor != "center" else { return true }
         let leftAnchor = s.cfg.anchor.hasSuffix("Left"), topAnchor = s.cfg.anchor.hasPrefix("top")
         switch e {
         case .left: return leftAnchor
