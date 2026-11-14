@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="AppIcon-1024.png" alt="UsableDisplay icon" width="160">
+  <img src="AppIcon-1024.png" alt="UsableArea icon" width="160">
 </p>
 
-<h1 align="center">UsableDisplay</h1>
+<h1 align="center">UsableArea</h1>
 
 <p align="center">
   A small macOS menu bar app that lets you use only the <em>working part</em> of a display with dead pixels, or make a big screen behave like a smaller one.
@@ -12,7 +12,7 @@
 
 ## What it does
 
-Got a dead row of pixels along the edge of your OLED TV or monitor? UsableDisplay hides it behind a black border and makes macOS treat the rest of the screen as the whole desktop, so the menu bar, Dock and windows never go under the damaged area.
+Got a dead row of pixels along the edge of your OLED TV or monitor? UsableArea hides it behind a black border and makes macOS treat the rest of the screen as the whole desktop, so the menu bar, Dock and windows never go under the damaged area.
 
 It can also emulate a **smaller screen** on a larger panel. For example, it can make a 48″ TV behave like a 24″ or 40″ monitor by changing a number.
 
@@ -20,7 +20,7 @@ It was built for an LG C1 48″ (3840×2160) on an M4 Mac mini running macOS 15 
 
 ## How it works
 
-macOS has no built-in underscan for HDMI displays, and a black bar drawn on top of the screen doesn't change the usable desktop area. UsableDisplay does this instead:
+macOS has no built-in underscan for HDMI displays, and a black bar drawn on top of the screen doesn't change the usable desktop area. UsableArea does this instead:
 
 1. It creates a **virtual display** at the usable size (the panel size minus your borders).
 2. It makes the virtual display your main display, so the menu bar, Dock and new windows land there.
@@ -48,12 +48,12 @@ macOS has no built-in underscan for HDMI displays, and a black bar drawn on top 
 
 ```bash
 git clone <this repo>
-cd UsableDisplay
+cd UsableArea
 ./build.sh
-open UsableDisplay.app
+open UsableArea.app
 ```
 
-`build.sh` compiles `main.swift` with `swiftc`, generates the app icon from `AppIcon-1024.png`, bundles `MenuIcon.png`, and ad-hoc signs the result. To keep the app, move `UsableDisplay.app` to `/Applications`.
+`build.sh` compiles `main.swift` with `swiftc`, generates the app icon from `AppIcon-1024.png`, bundles `MenuIcon.png`, and ad-hoc signs the result. To keep the app, move `UsableArea.app` to `/Applications`.
 
 ## First run
 
@@ -65,6 +65,8 @@ open UsableDisplay.app
 Because the build is ad-hoc signed, macOS may ask for the permission again after you rebuild.
 
 ## Usage
+
+Settings are grouped into pages in a sidebar: **Display**, **Size & Borders**, **Aspect Ratio**, **Virtual Screen**, **Startup** and **Troubleshooting**. Changes are saved as you make them and take effect when you press **Apply**.
 
 | Setting | Meaning |
 |---|---|
@@ -83,15 +85,15 @@ Because the build is ad-hoc signed, macOS may ask for the permission again after
 
 - **Private API.** The virtual display uses `CGVirtualDisplay`, an undocumented CoreGraphics interface (the same one used by tools like BetterDisplay and DeskPad). A future macOS update could break it.
 - **Slight overhead.** Capturing and redrawing adds roughly a frame of latency and some GPU use. It's fine for desktop work but not ideal for fast games.
-- **Cursor.** The physical display is placed diagonally off the virtual one, touching only at a corner, so the cursor rarely wanders onto the black overlay. It can still happen at the exact corner.
+- **Cursor.** The physical display is placed diagonally off the virtual one, touching only at a corner. To stop the pointer escaping onto the black border (where clicks do nothing), the app warps it back onto the virtual screen. This can be turned off in Settings.
 - **Other screens.** DRM-protected video may show as black in a capture, depending on the app.
 
 ## Troubleshooting
 
-- **Nothing happens, or the screen stays black.** Check the Screen Recording permission, then choose **Re-apply**. To see the app's log, run `log stream --predicate 'eventMessage CONTAINS "UsableDisplay"'`.
-- **Stuck overlay.** Choose **Quit** from the menu bar icon, or run `pkill UsableDisplay`.
+- **Nothing happens, or the screen stays black.** Check the Screen Recording permission, then choose **Re-apply**. To see the app's log, run `log stream --predicate 'eventMessage CONTAINS "UsableArea"'`.
+- **Stuck overlay.** Choose **Quit** from the menu bar icon, or run `pkill UsableArea`.
 - **Ghosting or double images on the TV.** Turn off motion processing on the TV (on LG OLED: TruMotion / Motion Eye Care and OLED Motion Pro), and use Game or PC mode.
-- **Green screen (or a nameless 1080p display afterwards) when the virtual screen is built.** Changing the display layout can make the HDMI link retrain, and a marginal link (for example 4K at 120 Hz over a long or non-certified cable) may fail to lock again. Set the display to **60 Hz** in System Settings → Displays before using the app, use a certified Ultra High Speed HDMI cable, and unplug and replug the cable to recover. The log (`log show --last 5m --predicate 'process == "UsableDisplay"'`) shows each stage.
+- **Green screen (or a nameless 1080p display afterwards) when the virtual screen is built.** Changing the display layout can make the HDMI link retrain, and a marginal link (for example 4K at 120 Hz over a long or non-certified cable) may fail to lock again. Set the display to **60 Hz** in System Settings → Displays before using the app, use a certified Ultra High Speed HDMI cable, and unplug and replug the cable to recover. The log (`log show --last 5m --predicate 'process == "UsableArea"'`) shows each stage.
 - **Display "lost" right after the virtual screen is created.** macOS hides a display that is mirroring another one from apps, so a TV that was put into a mirror set looks like it vanished. The app now logs every display (including mirror state) and switches mirroring off. The virtual display gets a new identity on every start so macOS cannot re-apply an old saved layout.
 - **Icon doesn't update after a rebuild.** Run `killall Finder` and `killall Dock`.
 - **Interface looks too large.** Turn HiDPI off in Settings.
@@ -113,7 +115,7 @@ Because the build is ad-hoc signed, macOS may ask for the permission again after
 
 If the display shows a green screen or no picture, for example after a forced reboot, you can recover it from another computer (SSH or remote desktop) or in Safe Mode:
 
-1. Stop the app and keep it from launching: `pkill UsableDisplay`, then remove it under *System Settings → General → Login Items & Extensions* (or move `UsableDisplay.app` to the Trash).
+1. Stop the app and keep it from launching: `pkill UsableArea`, then remove it under *System Settings → General → Login Items & Extensions* (or move `UsableArea.app` to the Trash).
 2. Reset the saved display layout, then reboot:
    ```bash
    sudo rm -f /Library/Preferences/com.apple.windowserver.displays.plist
@@ -138,7 +140,7 @@ MenuIcon.png        Menu bar template icon (@3x)
 
 ## Privacy
 
-UsableDisplay never sends anything over the network. It captures only its own virtual display, and only to draw it on your physical display. Settings are stored locally in `UserDefaults`.
+UsableArea never sends anything over the network. It captures only its own virtual display, and only to draw it on your physical display. Settings are stored locally in `UserDefaults`.
 
 ## Contributing
 

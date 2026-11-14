@@ -26,6 +26,7 @@ struct Config: Codable, Equatable {
     var refH = 0
     var loginDelay = 30         // seconds to wait when the app starts shortly after boot / login
     var autoStartOnLaunch = true
+    var confineMouse = true     // keep the pointer on the virtual screen (stops it escaping onto the black border)
     var debugStage = 4          // 1...4: stop setup early to find a problem step; 4 = full
 
     /// Decodes saved settings, filling keys added by newer versions with defaults,
@@ -201,7 +202,7 @@ final class Controller {
     var autostartBlocked: Bool { UserDefaults.standard.bool(forKey: blockedKey) }
 
     func setStatus(_ s: String) { status = s; onStatusChange?() }
-    private func log(_ s: String) { NSLog("UsableDisplay: \(s)") }
+    private func log(_ s: String) { NSLog("UsableArea: \(s)") }
 
     private func cancel(_ msg: String, gen: Int) {
         guard gen == generation else { return }
@@ -263,7 +264,7 @@ final class Controller {
             if userInitiated {
                 let a = NSAlert()
                 a.messageText = "Screen Recording permission needed"
-                a.informativeText = "Enable UsableDisplay in System Settings > Privacy & Security > Screen & System Audio Recording, then choose 'Re-apply' from the menu bar icon."
+                a.informativeText = "Enable UsableArea in System Settings > Privacy & Security > Screen & System Audio Recording, then choose 'Re-apply' from the menu bar icon."
                 a.runModal()
             }
             return
@@ -324,7 +325,34 @@ final class Controller {
         setStatus("Stopped. Display layout restored.")
     }
 
+    // MARK: Cursor guard
+    // The real display sits diagonally off the virtual one and touches it at a corner, so a fast flick into
+    // that corner can put the pointer on the black border where clicks do nothing. Warp it back.
+    private var cursorTimer: Timer?
+
+    private func startCursorGuard() {
+        cursorTimer?.invalidate()
+        _ = CGSetLocalEventsSuppressionInterval(0)   // no pause in mouse movement after a warp
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.guardCursor() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        cursorTimer = t
+    }
+
+    private func guardCursor() {
+        guard let vd = vdisplay, let loc = CGEvent(source: nil)?.location else { return }
+        let b = CGDisplayBounds(vd.displayID)
+        guard !b.contains(loc) else { return }
+        let p = CGPoint(x: min(max(loc.x, b.minX + 1), b.maxX - 2),
+                        y: min(max(loc.y, b.minY + 1), b.maxY - 2))
+        _ = CGWarpMouseCursorPosition(p)
+        _ = CGAssociateMouseAndMouseCursorPosition(1)
+    }
+
     func stop(autoRestart: Bool = false) {
+        cursorTimer?.invalidate()
+        cursorTimer = nil
         log("stop(autoRestart: \(autoRestart))")
         established = false
         generation += 1
@@ -408,7 +436,7 @@ final class Controller {
         // 1. Virtual display
         guard let desc = CGVirtualDisplayDescriptor() else { return fail("descriptor init failed", gen: gen) }
         desc.queue = DispatchQueue.main
-        desc.name = "Usable Display"
+        desc.name = "Usable Area"
         desc.vendorID = virtualVendorTag
         desc.productID = 0x0001
         // New identity every time, so macOS cannot re-apply a saved (possibly mirrored) layout from an earlier run
@@ -521,11 +549,12 @@ final class Controller {
             sc.queueDepth = 5
             sc.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(cfg.refresh))
             let st = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: sc, delegate: nil)
-            try st.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "usabledisplay.capture"))
+            try st.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "usablearea.capture"))
             try await st.startCapture()
             if gen == generation {
                 stream = st
                 established = true
+                if cfg.confineMouse { startCursorGuard() }
                 if (userInitiated || cfg.refW == 0) && (cfg.refW != pw || cfg.refH != ph) {
                     Settings.shared.cfg.refW = pw
                     Settings.shared.cfg.refH = ph
@@ -542,16 +571,66 @@ final class Controller {
 
 // MARK: - Settings UI
 
-struct ContentHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+enum SettingsPage: String, CaseIterable, Identifiable {
+    case display, size, aspect, virtual, startup, troubleshooting
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .display: return "Display"
+        case .size: return "Size & Borders"
+        case .aspect: return "Aspect Ratio"
+        case .virtual: return "Virtual Screen"
+        case .startup: return "Startup"
+        case .troubleshooting: return "Troubleshooting"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .display: return "display"
+        case .size: return "arrow.up.left.and.arrow.down.right"
+        case .aspect: return "aspectratio"
+        case .virtual: return "rectangle.on.rectangle"
+        case .startup: return "power"
+        case .troubleshooting: return "wrench.and.screwdriver"
+        }
+    }
+    var color: Color {
+        switch self {
+        case .display: return .blue
+        case .size: return .orange
+        case .aspect: return .purple
+        case .virtual: return .teal
+        case .startup: return .green
+        case .troubleshooting: return .gray
+        }
+    }
+}
+
+struct SidebarIcon: View {
+    let symbol: String
+    let color: Color
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 22, height: 22)
+            .background(RoundedRectangle(cornerRadius: 5).fill(color))
+    }
 }
 
 struct SettingsView: View {
     @ObservedObject var s = Settings.shared
+    @State private var page: SettingsPage? = .display
     @State private var uniform = 0
+    @State private var applied = Settings.shared.cfg   // what the running virtual screen was last built from
     var onApply: () -> Void
-    var onHeight: (CGFloat) -> Void = { _ in }   // reports the full content height
+
+    // Settings are saved as you type; they only take effect when you press Apply.
+    var pending: Bool {
+        var a = applied
+        a.refW = s.cfg.refW; a.refH = s.cfg.refH; a.enabled = s.cfg.enabled   // changed by the app itself
+        return a != s.cfg
+    }
 
     var summary: String {
         guard let scr = pickPhysical(s.cfg) else { return "No physical display found" }
@@ -561,134 +640,211 @@ struct SettingsView: View {
         return "Display:          \(scr.localizedName)\nPhysical panel:   \(pw) × \(ph) px\nVirtual screen:   \(g.vw) × \(g.vh) px\nPosition:         \(g.x) px from left, \(g.y) px from top\nEquivalent size:  ≈ \(eq) inch"
     }
 
+    var oneLine: String {
+        guard let scr = pickPhysical(s.cfg) else { return "No physical display found" }
+        let (pw, ph) = nativePixels(screenID(scr))
+        let g = geometry(s.cfg, panelW: pw, panelH: ph)
+        let eq = String(format: "%.1f", s.cfg.panelInches * Double(g.vw) / Double(pw))
+        return "\(pw)×\(ph) panel  →  \(g.vw)×\(g.vh) virtual screen  ·  ≈ \(eq) inch"
+    }
+
     var body: some View {
-        ScrollView {
-            Form {
-                Section {
-                    Picker("Display", selection: $s.cfg.displayUUID) {
-                        Text("Automatic (largest display)").tag("")
-                        ForEach(physicalScreens(), id: \.self) { sc in
-                            Text(displayLabel(sc)).tag(displayUUID(screenID(sc)))
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                List(selection: $page) {
+                    ForEach(SettingsPage.allCases) { p in
+                        HStack(spacing: 8) {
+                            SidebarIcon(symbol: p.symbol, color: p.color)
+                            Text(p.title)
                         }
+                        .padding(.vertical, 2)
+                        .tag(p)
                     }
-                    dblRow("Real panel diagonal", $s.cfg.panelInches, unit: "inch")
-                } header: { Text("Physical display") }
-                  footer: { Text("The real size of your TV or monitor. Only used to convert inches to pixels.") }
-
-                Section {
-                    Picker("Mode", selection: $s.cfg.sizeMode) {
-                        Text("Border pixels").tag("borders")
-                        Text("Screen size").tag("diagonal")
-                    }
-                    .pickerStyle(.segmented)
-                    if s.cfg.sizeMode == "diagonal" {
-                        dblRow("Emulated screen diagonal", $s.cfg.targetInches, unit: "inch")
-                    }
-                } header: { Text("Image size") }
-                  footer: {
-                    Text(s.cfg.sizeMode == "diagonal"
-                         ? "The image is shrunk to look like a screen of this size and centered on the panel."
-                         : "The image fills the panel minus the black borders set below.")
                 }
+                .listStyle(.sidebar)
+                .frame(width: 200)
 
-                Section {
-                    intRow("Top", $s.cfg.top)
-                    intRow("Bottom", $s.cfg.bottom)
-                    intRow("Left", $s.cfg.left)
-                    intRow("Right", $s.cfg.right)
-                    LabeledContent("Set all sides") {
-                        HStack(spacing: 6) {
-                            TextField("", value: $uniform, format: .number)
-                                .labelsHidden().textFieldStyle(.roundedBorder)
-                                .multilineTextAlignment(.trailing).frame(width: 80)
-                            Text("px").foregroundStyle(.secondary).frame(width: 30, alignment: .leading)
-                            Button("Set") {
-                                s.cfg.top = uniform; s.cfg.bottom = uniform
-                                s.cfg.left = uniform; s.cfg.right = uniform
-                            }
-                        }
-                    }
-                } header: { Text(s.cfg.sizeMode == "diagonal" ? "Dead-pixel reserve" : "Black border") }
-                  footer: { Text("Pixels on each edge of the physical panel that are kept black (measured in panel pixels).") }
+                Divider()
 
-                Section {
-                    Toggle("Keep screen aspect ratio", isOn: $s.cfg.keepAspect)
-                    Picker("Ratio", selection: $s.cfg.aspectPreset) {
-                        Text("None (fill area)").tag("free")
-                        Text("16:9").tag("16:9")
-                        Text("16:10").tag("16:10")
-                        Text("4:3").tag("4:3")
-                        Text("21:9").tag("21:9")
-                        Text("Custom").tag("custom")
+                VStack(alignment: .leading, spacing: 0) {
+                    Text((page ?? .display).title)
+                        .font(.title2.weight(.semibold))
+                        .padding(.horizontal, 20).padding(.top, 14).padding(.bottom, 2)
+                    ScrollView {
+                        Form { pageContent(page ?? .display) }
+                            .formStyle(.grouped)
                     }
-                    .disabled(s.cfg.keepAspect)
-                    if s.cfg.aspectPreset == "custom" && !s.cfg.keepAspect {
-                        LabeledContent("Custom ratio") {
-                            HStack(spacing: 6) {
-                                TextField("", value: $s.cfg.customW, format: .number)
-                                    .labelsHidden().textFieldStyle(.roundedBorder)
-                                    .multilineTextAlignment(.trailing).frame(width: 60)
-                                Text(":")
-                                TextField("", value: $s.cfg.customH, format: .number)
-                                    .labelsHidden().textFieldStyle(.roundedBorder)
-                                    .multilineTextAlignment(.trailing).frame(width: 60)
-                            }
-                        }
-                    }
-                } header: { Text("Aspect ratio") }
-                  footer: {
-                    Text(s.cfg.keepAspect
-                         ? "On: the image keeps your screen's own shape. Extra black is added on the other edges as needed."
-                         : "Off: choose any ratio. Extra black is added on the other edges so the image has that shape.")
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
 
-                Section {
-                    Toggle("HiDPI (2×)", isOn: $s.cfg.hiDPI)
-                    Picker("Refresh rate", selection: $s.cfg.refresh) {
-                        Text("30 Hz").tag(30); Text("60 Hz").tag(60); Text("120 Hz").tag(120)
+            Divider()
+
+            HStack(spacing: 12) {
+                Text(oneLine)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.tail)
+                Spacer()
+                if pending {
+                    Text("Changes not applied yet").font(.caption).foregroundStyle(.orange)
+                }
+                Button("Apply") {
+                    NSApp.keyWindow?.makeFirstResponder(nil)   // commit any text field being edited
+                    DispatchQueue.main.async {
+                        applied = s.cfg
+                        onApply()
                     }
-                } header: { Text("Virtual screen") }
-                  footer: { Text("HiDPI makes the interface look half the pixel size (sharper, larger text).") }
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+        }
+        .frame(minWidth: 700, minHeight: 480)
+    }
 
-                Section {
-                    Toggle("Start automatically when the app launches", isOn: $s.cfg.autoStartOnLaunch)
-                    intRow("Delay after login", $s.cfg.loginDelay, unit: "sec")
-                    intRow("Delay after wake", $s.cfg.startDelay, unit: "sec")
-                } header: { Text("Startup") }
-                  footer: { Text("The delays give the display time to settle before the virtual screen is built. If your screen goes green at login, increase the login delay or turn off automatic start and use Re-apply from the menu.") }
+    // MARK: Pages
 
-                Section {
-                    Picker("Setup stage", selection: $s.cfg.debugStage) {
-                        Text("Full (normal)").tag(4)
-                        Text("1: virtual display only").tag(1)
-                        Text("2: + display layout").tag(2)
-                        Text("3: + black overlay, no capture").tag(3)
-                    }
-                } header: { Text("Troubleshooting") }
-                  footer: { Text("Stops setup early to find which step causes a problem. Leave on Full for normal use.") }
+    @ViewBuilder
+    func pageContent(_ p: SettingsPage) -> some View {
+        switch p {
+        case .display: displayPage
+        case .size: sizePage
+        case .aspect: aspectPage
+        case .virtual: virtualPage
+        case .startup: startupPage
+        case .troubleshooting: troubleshootingPage
+        }
+    }
 
-                Section {
-                    Text(summary).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
-                } header: { Text("Result") }
-
-                HStack {
-                    Button("Reset to defaults") { s.cfg = Config() }
-                    Spacer()
-                    Button("Apply") {
-                        NSApp.keyWindow?.makeFirstResponder(nil)   // commit any text field being edited
-                        DispatchQueue.main.async { onApply() }
-                    }
-                    .keyboardShortcut(.defaultAction)
+    @ViewBuilder var displayPage: some View {
+        Section {
+            Picker("Display", selection: $s.cfg.displayUUID) {
+                Text("Automatic (largest display)").tag("")
+                ForEach(physicalScreens(), id: \.self) { sc in
+                    Text(displayLabel(sc)).tag(displayUUID(screenID(sc)))
                 }
             }
-            .formStyle(.grouped)
-            .background(GeometryReader { g in
-                Color.clear.preference(key: ContentHeightKey.self, value: g.size.height)
-            })
-        }
-        .frame(minWidth: 520, minHeight: 200)
-        .onPreferenceChange(ContentHeightKey.self) { onHeight($0) }
+            dblRow("Real panel diagonal", $s.cfg.panelInches, unit: "inch")
+        } header: { Text("Physical display") }
+          footer: { Text("The real size of your TV or monitor. Only used to convert inches to pixels.") }
+
+        Section {
+            Text(summary)
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+        } header: { Text("Current result") }
     }
+
+    @ViewBuilder var sizePage: some View {
+        Section {
+            Picker("Mode", selection: $s.cfg.sizeMode) {
+                Text("Border pixels").tag("borders")
+                Text("Screen size").tag("diagonal")
+            }
+            .pickerStyle(.segmented)
+            if s.cfg.sizeMode == "diagonal" {
+                dblRow("Emulated screen diagonal", $s.cfg.targetInches, unit: "inch")
+            }
+        } header: { Text("Image size") }
+          footer: {
+            Text(s.cfg.sizeMode == "diagonal"
+                 ? "The image is shrunk to look like a screen of this size and centered on the panel."
+                 : "The image fills the panel minus the black borders set below.")
+        }
+
+        Section {
+            intRow("Top", $s.cfg.top)
+            intRow("Bottom", $s.cfg.bottom)
+            intRow("Left", $s.cfg.left)
+            intRow("Right", $s.cfg.right)
+            LabeledContent("Set all sides") {
+                HStack(spacing: 6) {
+                    TextField("", value: $uniform, format: .number)
+                        .labelsHidden().textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.trailing).frame(width: 80)
+                    Text("px").foregroundStyle(.secondary).frame(width: 30, alignment: .leading)
+                    Button("Set") {
+                        s.cfg.top = uniform; s.cfg.bottom = uniform
+                        s.cfg.left = uniform; s.cfg.right = uniform
+                    }
+                }
+            }
+        } header: { Text(s.cfg.sizeMode == "diagonal" ? "Dead-pixel reserve" : "Black border") }
+          footer: { Text("Pixels on each edge of the physical panel that are kept black (measured in panel pixels).") }
+    }
+
+    @ViewBuilder var aspectPage: some View {
+        Section {
+            Toggle("Keep screen aspect ratio", isOn: $s.cfg.keepAspect)
+            Picker("Ratio", selection: $s.cfg.aspectPreset) {
+                Text("None (fill area)").tag("free")
+                Text("16:9").tag("16:9")
+                Text("16:10").tag("16:10")
+                Text("4:3").tag("4:3")
+                Text("21:9").tag("21:9")
+                Text("Custom").tag("custom")
+            }
+            .disabled(s.cfg.keepAspect)
+            if s.cfg.aspectPreset == "custom" && !s.cfg.keepAspect {
+                LabeledContent("Custom ratio") {
+                    HStack(spacing: 6) {
+                        TextField("", value: $s.cfg.customW, format: .number)
+                            .labelsHidden().textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing).frame(width: 60)
+                        Text(":")
+                        TextField("", value: $s.cfg.customH, format: .number)
+                            .labelsHidden().textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing).frame(width: 60)
+                    }
+                }
+            }
+        } footer: {
+            Text(s.cfg.keepAspect
+                 ? "On: the image keeps your screen's own shape. Extra black is added on the other edges as needed."
+                 : "Off: choose any ratio. Extra black is added on the other edges so the image has that shape.")
+        }
+    }
+
+    @ViewBuilder var virtualPage: some View {
+        Section {
+            Toggle("HiDPI (2×)", isOn: $s.cfg.hiDPI)
+            Picker("Refresh rate", selection: $s.cfg.refresh) {
+                Text("30 Hz").tag(30); Text("60 Hz").tag(60); Text("120 Hz").tag(120)
+            }
+        } footer: { Text("HiDPI makes the interface look half the pixel size (sharper, larger text).") }
+
+        Section {
+            Toggle("Keep the mouse on the virtual screen", isOn: $s.cfg.confineMouse)
+        } footer: { Text("Stops the pointer wandering onto the black border, where clicks do nothing.") }
+    }
+
+    @ViewBuilder var startupPage: some View {
+        Section {
+            Toggle("Start automatically when the app launches", isOn: $s.cfg.autoStartOnLaunch)
+            intRow("Delay after login", $s.cfg.loginDelay, unit: "sec")
+            intRow("Delay after wake", $s.cfg.startDelay, unit: "sec")
+        } footer: {
+            Text("The delays give the display time to settle before the virtual screen is built. If your screen goes green at login, increase the login delay or turn off automatic start and use Re-apply from the menu.")
+        }
+    }
+
+    @ViewBuilder var troubleshootingPage: some View {
+        Section {
+            Picker("Setup stage", selection: $s.cfg.debugStage) {
+                Text("Full (normal)").tag(4)
+                Text("1: virtual display only").tag(1)
+                Text("2: + display layout").tag(2)
+                Text("3: + black overlay, no capture").tag(3)
+            }
+        } header: { Text("Setup") }
+          footer: { Text("Stops setup early to find which step causes a problem. Leave on Full for normal use.") }
+
+        Section {
+            Button("Reset all settings to defaults", role: .destructive) { s.cfg = Config() }
+        } footer: { Text("Restores every setting, including the border sizes. Press Apply afterwards to use them.") }
+    }
+
+    // MARK: Rows
 
     func intRow(_ title: String, _ v: Binding<Int>, unit: String = "px") -> some View {
         LabeledContent(title) {
@@ -719,9 +875,6 @@ struct SettingsView: View {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var item: NSStatusItem!
     var settingsWindow: NSWindow?
-    var settingsContentHeight: CGFloat = 0
-    var userResizedSettings = false
-    var settingsNeedsCenter = true
     var debounce: DispatchWorkItem?
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -732,7 +885,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             img.isTemplate = true   // adapts to light/dark menu bar
             item.button?.image = img
         } else {
-            item.button?.image = NSImage(systemSymbolName: "rectangle.inset.filled", accessibilityDescription: "UsableDisplay")
+            item.button?.image = NSImage(systemSymbolName: "rectangle.inset.filled", accessibilityDescription: "UsableArea")
         }
         Controller.shared.onStatusChange = { [weak self] in self?.buildMenu() }
         buildMenu()
@@ -796,51 +949,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func openSettings() {
         if settingsWindow == nil {
-            let host = NSHostingView(rootView: SettingsView(
-                onApply: { Controller.shared.start() },
-                onHeight: { [weak self] h in self?.settingsContentHeightChanged(h) }))
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 600),
-                             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-            w.title = "UsableDisplay Settings"
+            let host = NSHostingView(rootView: SettingsView(onApply: { Controller.shared.start() }))
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540),
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                             backing: .buffered, defer: false)
+            w.title = "UsableArea Settings"
             w.contentView = host
+            w.contentMinSize = NSSize(width: 700, height: 480)
             w.isReleasedWhenClosed = false
-            w.center()
-            NotificationCenter.default.addObserver(forName: NSWindow.willStartLiveResizeNotification,
-                                                   object: w, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.userResizedSettings = true }
-            }
+            if !w.setFrameUsingName("UsableAreaSettings") { w.center() }
+            _ = w.setFrameAutosaveName("UsableAreaSettings")
             settingsWindow = w
         }
-        userResizedSettings = false
-        settingsNeedsCenter = true
-        fitSettingsWindow()
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
-    }
-
-    func settingsContentHeightChanged(_ h: CGFloat) {
-        guard h > 100 else { return }
-        settingsContentHeight = h
-        if !userResizedSettings { fitSettingsWindow() }
-    }
-
-    /// Size the window to its full content so no scroll bar is needed,
-    /// unless the screen is too small, in which case it fills the available height and scrolls.
-    func fitSettingsWindow() {
-        guard let w = settingsWindow else { return }
-        guard settingsContentHeight > 100 else { return }   // wait for the first measurement
-        let vis = (w.screen ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
-        let chrome = w.frame.height - w.contentLayoutRect.height          // title bar
-        let contentH = min(settingsContentHeight, vis.height - chrome - 24)
-        var f = w.frameRect(forContentRect: NSRect(x: 0, y: 0, width: w.contentLayoutRect.width, height: contentH))
-        if settingsNeedsCenter {
-            f.origin = NSPoint(x: vis.midX - f.width / 2, y: vis.midY - f.height / 2)
-            settingsNeedsCenter = false
-        } else {
-            f.origin = NSPoint(x: w.frame.origin.x, y: w.frame.maxY - f.height)   // keep the top edge fixed
-        }
-        f.origin.y = min(max(f.origin.y, vis.minY), vis.maxY - f.height)
-        w.setFrame(f, display: true, animate: false)
     }
 
     // Re-run automatically when the HDMI display disconnects/reconnects (e.g. TV power cycle).
