@@ -202,7 +202,7 @@ final class Controller {
     var autostartBlocked: Bool { UserDefaults.standard.bool(forKey: blockedKey) }
 
     func setStatus(_ s: String) { status = s; onStatusChange?() }
-    private func log(_ s: String) { NSLog("UsableArea: \(s)") }
+    private func log(_ s: String) { NSLog("UsableDisplay: \(s)") }
 
     private func cancel(_ msg: String, gen: Int) {
         guard gen == generation else { return }
@@ -264,7 +264,7 @@ final class Controller {
             if userInitiated {
                 let a = NSAlert()
                 a.messageText = "Screen Recording permission needed"
-                a.informativeText = "Enable UsableArea in System Settings > Privacy & Security > Screen & System Audio Recording, then choose 'Re-apply' from the menu bar icon."
+                a.informativeText = "Enable UsableDisplay in System Settings > Privacy & Security > Screen & System Audio Recording, then choose 'Re-apply' from the menu bar icon."
                 a.runModal()
             }
             return
@@ -436,7 +436,7 @@ final class Controller {
         // 1. Virtual display
         guard let desc = CGVirtualDisplayDescriptor() else { return fail("descriptor init failed", gen: gen) }
         desc.queue = DispatchQueue.main
-        desc.name = "Usable Area"
+        desc.name = "Usable Display"
         desc.vendorID = virtualVendorTag
         desc.productID = 0x0001
         // New identity every time, so macOS cannot re-apply a saved (possibly mirrored) layout from an earlier run
@@ -549,7 +549,7 @@ final class Controller {
             sc.queueDepth = 5
             sc.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(cfg.refresh))
             let st = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: sc, delegate: nil)
-            try st.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "usablearea.capture"))
+            try st.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "usabledisplay.capture"))
             try await st.startCapture()
             if gen == generation {
                 stream = st
@@ -885,7 +885,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             img.isTemplate = true   // adapts to light/dark menu bar
             item.button?.image = img
         } else {
-            item.button?.image = NSImage(systemSymbolName: "rectangle.inset.filled", accessibilityDescription: "UsableArea")
+            item.button?.image = NSImage(systemSymbolName: "rectangle.inset.filled", accessibilityDescription: "UsableDisplay")
         }
         Controller.shared.onStatusChange = { [weak self] in self?.buildMenu() }
         buildMenu()
@@ -953,12 +953,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
                              backing: .buffered, defer: false)
-            w.title = "UsableArea Settings"
+            w.title = "UsableDisplay Settings"
             w.contentView = host
             w.contentMinSize = NSSize(width: 700, height: 480)
             w.isReleasedWhenClosed = false
-            if !w.setFrameUsingName("UsableAreaSettings") { w.center() }
-            _ = w.setFrameAutosaveName("UsableAreaSettings")
+            if !w.setFrameUsingName("UsableDisplaySettings") { w.center() }
+            _ = w.setFrameAutosaveName("UsableDisplaySettings")
             settingsWindow = w
         }
         NSApp.activate(ignoringOtherApps: true)
