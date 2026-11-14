@@ -66,6 +66,8 @@ Because the build is ad-hoc signed, macOS may ask for the permission again after
 
 ## Usage
 
+Settings are grouped into pages in a sidebar: **Display**, **Size & Borders**, **Aspect Ratio**, **Virtual Screen**, **Startup** and **Troubleshooting**. Changes are saved as you make them and take effect when you press **Apply**.
+
 | Setting | Meaning |
 |---|---|
 | **Display** | Which physical display to work on. |
@@ -83,7 +85,7 @@ Because the build is ad-hoc signed, macOS may ask for the permission again after
 
 - **Private API.** The virtual display uses `CGVirtualDisplay`, an undocumented CoreGraphics interface (the same one used by tools like BetterDisplay and DeskPad). A future macOS update could break it.
 - **Slight overhead.** Capturing and redrawing adds roughly a frame of latency and some GPU use. It's fine for desktop work but not ideal for fast games.
-- **Cursor.** The physical display is placed diagonally off the virtual one, touching only at a corner, so the cursor rarely wanders onto the black overlay. It can still happen at the exact corner.
+- **Cursor.** The physical display is placed diagonally off the virtual one, touching only at a corner. To stop the pointer escaping onto the black border (where clicks do nothing), the app warps it back onto the virtual screen. This can be turned off in Settings.
 - **Other screens.** DRM-protected video may show as black in a capture, depending on the app.
 
 ## Troubleshooting
