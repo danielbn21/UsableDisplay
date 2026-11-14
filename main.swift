@@ -332,7 +332,8 @@ final class Controller {
 
     private func startCursorGuard() {
         cursorTimer?.invalidate()
-        _ = CGSetLocalEventsSuppressionInterval(0)   // no pause in mouse movement after a warp
+        // No pause in mouse movement after a warp (the old global function was removed from macOS)
+        CGEventSource(stateID: .combinedSessionState)?.localEventsSuppressionInterval = 0
         let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.guardCursor() }
         }
