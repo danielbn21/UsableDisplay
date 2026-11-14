@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="AppIcon-1024.png" alt="UsableDisplay icon" width="160">
+  <img src="AppIcon-1024.png" alt="UsableArea icon" width="160">
 </p>
 
-<h1 align="center">UsableDisplay</h1>
+<h1 align="center">UsableArea</h1>
 
 <p align="center">
   A small macOS menu bar app that lets you use only the <em>working part</em> of a display with dead pixels, or make a big screen behave like a smaller one.
@@ -12,7 +12,7 @@
 
 ## What it does
 
-Got a dead row of pixels along the edge of your OLED TV or monitor? UsableDisplay hides it behind a black border and makes macOS treat the rest of the screen as the whole desktop, so the menu bar, Dock and windows never go under the damaged area.
+Got a dead row of pixels along the edge of your OLED TV or monitor? UsableArea hides it behind a black border and makes macOS treat the rest of the screen as the whole desktop, so the menu bar, Dock and windows never go under the damaged area.
 
 It can also emulate a **smaller screen** on a larger panel. For example, it can make a 48″ TV behave like a 24″ or 40″ monitor by changing a number.
 
@@ -20,7 +20,7 @@ It was built for an LG C1 48″ (3840×2160) on an M4 Mac mini running macOS 15 
 
 ## How it works
 
-macOS has no built-in underscan for HDMI displays, and a black bar drawn on top of the screen doesn't change the usable desktop area. UsableDisplay does this instead:
+macOS has no built-in underscan for HDMI displays, and a black bar drawn on top of the screen doesn't change the usable desktop area. UsableArea does this instead:
 
 1. It creates a **virtual display** at the usable size (the panel size minus your borders).
 2. It makes the virtual display your main display, so the menu bar, Dock and new windows land there.
@@ -30,8 +30,9 @@ macOS has no built-in underscan for HDMI displays, and a black bar drawn on top 
 ## Features
 
 - Border size in physical pixels for each edge (top, bottom, left, right).
-- Optional **screen size mode**: enter the diagonal you want (24″, 40″ and so on) and the image is scaled and centered.
-- Aspect ratio: keep your screen's own shape automatically, or turn that off and pick any ratio (16:9, 16:10, 4:3, 21:9, custom, or none).
+- A **lock** that decides what you set and what the app calculates: the borders, the aspect ratio, or the screen size (a diagonal such as 24″ or 40″).
+- Aspect ratios: match your screen, 16:9, 16:10, 4:3, 21:9 or any custom ratio, with the screen aligned to the corner you choose.
+- A live preview of the panel, the virtual screen and the resulting borders.
 - HiDPI (2×) or 1× virtual screen, and 30, 60 or 120 Hz refresh.
 - Live summary of the resulting virtual resolution and position.
 - Menu bar app with Enable/Disable, Re-apply and Launch at Login.
@@ -48,12 +49,12 @@ macOS has no built-in underscan for HDMI displays, and a black bar drawn on top 
 
 ```bash
 git clone <this repo>
-cd UsableDisplay
+cd UsableArea
 ./build.sh
-open UsableDisplay.app
+open UsableArea.app
 ```
 
-`build.sh` compiles `main.swift` with `swiftc`, generates the app icon from `AppIcon-1024.png`, bundles `MenuIcon.png`, and ad-hoc signs the result. To keep the app, move `UsableDisplay.app` to `/Applications`.
+`build.sh` compiles `main.swift` with `swiftc`, generates the app icon from `AppIcon-1024.png`, bundles `MenuIcon.png`, and ad-hoc signs the result. To keep the app, move `UsableArea.app` to `/Applications`.
 
 ## First run
 
@@ -66,20 +67,28 @@ Because the build is ad-hoc signed, macOS may ask for the permission again after
 
 ## Usage
 
-Settings are grouped into pages in a sidebar: **Display**, **Size & Borders**, **Aspect Ratio**, **Virtual Screen**, **Startup** and **Troubleshooting**. Changes are saved as you make them and take effect when you press **Apply**.
+Settings are grouped into pages in a sidebar: **Display**, **Size & Borders**, **Virtual Screen**, **Startup** and **Troubleshooting**. Changes are saved as you make them and take effect when you press **Apply**. The bar at the bottom always shows the result: panel and virtual screen resolution, equivalent screen size, refresh rate, HiDPI state and the offset of the virtual screen from the panel's center.
 
-| Setting | Meaning |
+### Size & Borders
+
+The page shows a preview and one choice, **what stays fixed**. Everything else is either something you set or something the app calculates (greyed).
+
+| Lock | You set | The app calculates |
+|---|---|---|
+| **Borders** | all four borders | screen size, aspect ratio, inches |
+| **Aspect ratio** | the ratio, plus the borders as margins | the largest screen of that ratio that fits inside the margins, placed against the chosen corner |
+| **Size** | screen diagonal and aspect ratio, plus the two borders next to the chosen corner | the other two borders |
+
+In the **Aspect ratio** and **Size** locks you also choose the corner the screen is aligned to (top left by default).
+
+| Other settings | Meaning |
 |---|---|
 | **Display** | Which physical display to work on. |
-| **Real panel diagonal** | Actual size of your screen in inches. Only used for the inch conversion. |
-| **Mode: Border pixels** | The image fills the panel minus the borders you set. |
-| **Mode: Screen size** | The image is scaled to look like a screen of the given diagonal and centered. Borders still reserve the dead area. |
-| **Top / Bottom / Left / Right** | Pixels kept black on each edge of the physical panel. |
-| **Keep screen aspect ratio** | On: the image keeps your screen's own shape (the ratio picker is disabled). Off: pick any ratio below. Extra black is added on the other edges as needed. |
+| **Real panel diagonal** | Actual size of your screen in inches. Used for the inch conversion. |
 | **HiDPI (2×)** | Sharper UI that looks half the pixel size. Turn it off for small emulated sizes, where a HiDPI UI looks very large. |
 | **Refresh rate** | Refresh rate of the virtual screen. |
 
-**Example (LG C1 48″, 16 px dead strip at the top):** set Top to 16 and leave the other sides at 0. With "Keep screen aspect ratio" on, this gives a 3808×2144 virtual screen.
+**Example (LG C1 48″, 16 px dead strip at the top):** choose the **Aspect ratio** lock with "Match panel", set Top to 16 and leave the other borders at 0. This gives a virtual screen of 3810×2144, aligned to the top left (the spare 30 px of width stays on the right).
 
 ## Known limitations
 
@@ -90,10 +99,10 @@ Settings are grouped into pages in a sidebar: **Display**, **Size & Borders**, *
 
 ## Troubleshooting
 
-- **Nothing happens, or the screen stays black.** Check the Screen Recording permission, then choose **Re-apply**. To see the app's log, run `log stream --predicate 'eventMessage CONTAINS "UsableDisplay"'`.
-- **Stuck overlay.** Choose **Quit** from the menu bar icon, or run `pkill UsableDisplay`.
+- **Nothing happens, or the screen stays black.** Check the Screen Recording permission, then choose **Re-apply**. To see the app's log, run `log stream --predicate 'eventMessage CONTAINS "UsableArea"'`.
+- **Stuck overlay.** Choose **Quit** from the menu bar icon, or run `pkill UsableArea`.
 - **Ghosting or double images on the TV.** Turn off motion processing on the TV (on LG OLED: TruMotion / Motion Eye Care and OLED Motion Pro), and use Game or PC mode.
-- **Green screen (or a nameless 1080p display afterwards) when the virtual screen is built.** Changing the display layout can make the HDMI link retrain, and a marginal link (for example 4K at 120 Hz over a long or non-certified cable) may fail to lock again. Set the display to **60 Hz** in System Settings → Displays before using the app, use a certified Ultra High Speed HDMI cable, and unplug and replug the cable to recover. The log (`log show --last 5m --predicate 'process == "UsableDisplay"'`) shows each stage.
+- **Green screen (or a nameless 1080p display afterwards) when the virtual screen is built.** Changing the display layout can make the HDMI link retrain, and a marginal link (for example 4K at 120 Hz over a long or non-certified cable) may fail to lock again. Set the display to **60 Hz** in System Settings → Displays before using the app, use a certified Ultra High Speed HDMI cable, and unplug and replug the cable to recover. The log (`log show --last 5m --predicate 'process == "UsableArea"'`) shows each stage.
 - **Display "lost" right after the virtual screen is created.** macOS hides a display that is mirroring another one from apps, so a TV that was put into a mirror set looks like it vanished. The app now logs every display (including mirror state) and switches mirroring off. The virtual display gets a new identity on every start so macOS cannot re-apply an old saved layout.
 - **Icon doesn't update after a rebuild.** Run `killall Finder` and `killall Dock`.
 - **Interface looks too large.** Turn HiDPI off in Settings.
@@ -115,7 +124,7 @@ Settings are grouped into pages in a sidebar: **Display**, **Size & Borders**, *
 
 If the display shows a green screen or no picture, for example after a forced reboot, you can recover it from another computer (SSH or remote desktop) or in Safe Mode:
 
-1. Stop the app and keep it from launching: `pkill UsableDisplay`, then remove it under *System Settings → General → Login Items & Extensions* (or move `UsableDisplay.app` to the Trash).
+1. Stop the app and keep it from launching: `pkill UsableArea`, then remove it under *System Settings → General → Login Items & Extensions* (or move `UsableArea.app` to the Trash).
 2. Reset the saved display layout, then reboot:
    ```bash
    sudo rm -f /Library/Preferences/com.apple.windowserver.displays.plist
@@ -140,7 +149,7 @@ MenuIcon.png        Menu bar template icon (@3x)
 
 ## Privacy
 
-UsableDisplay never sends anything over the network. It captures only its own virtual display, and only to draw it on your physical display. Settings are stored locally in `UserDefaults`.
+UsableArea never sends anything over the network. It captures only its own virtual display, and only to draw it on your physical display. Settings are stored locally in `UserDefaults`.
 
 ## Contributing
 
