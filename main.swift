@@ -244,18 +244,49 @@ func displayLabel(_ s: NSScreen) -> String {
 
 // MARK: - Frame sink (ScreenCaptureKit -> CALayer)
 
-final class FrameSink: NSObject, SCStreamOutput {
+final class FrameSink: NSObject, SCStreamOutput, SCStreamDelegate {
     weak var layer: CALayer?
-    private var held: CVPixelBuffer?   // main thread only; keeps the shown frame's buffer alive
+    var onStreamStopped: ((Error) -> Void)?
+    private var held: CVPixelBuffer?              // main thread only; keeps the shown frame's buffer alive
+    private let lock = NSLock()
+    private var pending: CVPixelBuffer?           // newest frame not yet shown (older ones are dropped)
+    private var hopScheduled = false
+    private var _lastFrame = CFAbsoluteTimeGetCurrent()
+
+    var lastFrameTime: CFAbsoluteTime { lock.lock(); defer { lock.unlock() }; return _lastFrame }
+    func markFrame() { lock.lock(); _lastFrame = CFAbsoluteTimeGetCurrent(); lock.unlock() }
+
+    /// ScreenCaptureKit calls this when it kills the stream (display sleep, replayd restart, mode change...).
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        DispatchQueue.main.async { [weak self] in self?.onStreamStopped?(error) }
+    }
+
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, sb.isValid,
               let atts = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = atts.first?[.status] as? Int,
               SCFrameStatus(rawValue: raw) == .complete,
               let pb = CMSampleBufferGetImageBuffer(sb),
-              let surf = CVPixelBufferGetIOSurface(pb)?.takeUnretainedValue() else { return }
+              CVPixelBufferGetIOSurface(pb) != nil else { return }
+        // Coalesce: keep only the newest frame and queue at most ONE hop to the main thread. Before, every
+        // frame queued its own block (each retaining a pooled buffer), so a busy main thread starved the
+        // stream's buffer pool and ScreenCaptureKit silently stopped delivering frames.
+        lock.lock()
+        _lastFrame = CFAbsoluteTimeGetCurrent()
+        pending = pb
+        let schedule = !hopScheduled
+        hopScheduled = true
+        lock.unlock()
+        guard schedule else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, let layer = self.layer else { return }
+            guard let self else { return }
+            self.lock.lock()
+            let pb = self.pending
+            self.pending = nil
+            self.hopScheduled = false
+            self.lock.unlock()
+            guard let pb, let layer = self.layer,
+                  let surf = CVPixelBufferGetIOSurface(pb)?.takeUnretainedValue() else { return }
             // Core Animation cross-fades `contents` changes by default (the "ghost").
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -437,6 +468,9 @@ final class Controller {
     func stop(autoRestart: Bool = false) {
         cursorTimer?.invalidate()
         cursorTimer = nil
+        watchdog?.invalidate()
+        watchdog = nil
+        restartingCapture = false
         log("stop(autoRestart: \(autoRestart))")
         established = false
         generation += 1
@@ -660,28 +694,14 @@ final class Controller {
 
         // 5. Capture the virtual display
         do {
-            var target: SCDisplay?
-            for _ in 0..<20 {
-                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-                target = content.displays.first { $0.displayID == vd.displayID }
-                if target != nil { break }
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
-            guard gen == generation, let d = target else { return fail("capture target not found", gen: gen) }
-            let sc = SCStreamConfiguration()
-            sc.width = g.vw
-            sc.height = g.vh
-            sc.pixelFormat = kCVPixelFormatType_32BGRA
-            sc.showsCursor = true
-            sc.queueDepth = 5
-            sc.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(cfg.refresh))
-            let st = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: sc, delegate: nil)
-            try st.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "usabledisplay.capture"))
-            try await st.startCapture()
+            captureSpec = (vd.displayID, g.vw, g.vh, cfg.refresh)
+            guard gen == generation else { return }
+            guard let st = try await openStream(gen: gen) else { return fail("capture target not found", gen: gen) }
             if gen == generation {
                 stream = st
                 established = true
                 if cfg.confineMouse { startCursorGuard() }
+                startWatchdog()
                 if (userInitiated || cfg.refW == 0) && (cfg.refW != pw || cfg.refH != ph) {
                     Settings.shared.cfg.refW = pw
                     Settings.shared.cfg.refH = ph
@@ -692,6 +712,112 @@ final class Controller {
             } else { try? await st.stopCapture() }
         } catch {
             fail("capture error: \(error)", gen: gen)
+        }
+    }
+
+    // MARK: Capture (self-healing)
+
+    private var captureSpec: (id: CGDirectDisplayID, w: Int, h: Int, refresh: Int)?
+    private var watchdog: Timer?
+    private var restartingCapture = false
+    private var captureRestarts = 0
+
+    /// Creates and starts a ScreenCaptureKit stream on the virtual display. Returns nil if the display isn't visible to SCK.
+    private func openStream(gen: Int) async throws -> SCStream? {
+        guard let spec = captureSpec else { return nil }
+        sink.onStreamStopped = { [weak self] err in
+            MainActor.assumeIsolated { self?.streamDied(err) }
+        }
+        var target: SCDisplay?
+        for _ in 0..<20 {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            target = content.displays.first { $0.displayID == spec.id }
+            if target != nil { break }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard gen == generation, let d = target else { return nil }
+        let sc = SCStreamConfiguration()
+        sc.width = spec.w
+        sc.height = spec.h
+        sc.pixelFormat = kCVPixelFormatType_32BGRA
+        sc.showsCursor = true
+        sc.queueDepth = 8
+        sc.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(spec.refresh))
+        let st = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: sc, delegate: sink)
+        try st.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "usabledisplay.capture"))
+        try await st.startCapture()
+        sink.markFrame()
+        return st
+    }
+
+    private func streamDied(_ error: Error) {
+        guard running, established else { return }
+        log("capture stream stopped by the system: \(error)")
+        restartCapture(reason: "stream stopped")
+    }
+
+    /// Restarts ONLY the capture. The virtual display, layout and overlay window stay as they are, so there is
+    /// no HDMI retrain and no flicker. If that fails 3 times, falls back to a full restart.
+    func restartCapture(reason: String) {
+        guard running, established, !restartingCapture, captureSpec != nil else { return }
+        restartingCapture = true
+        captureRestarts += 1
+        let gen = generation
+        log("capture restart #\(captureRestarts): \(reason)")
+        let old = stream
+        stream = nil
+        Task { @MainActor in
+            defer { self.restartingCapture = false }
+            if let old { try? await old.stopCapture() }
+            for attempt in 1...3 {
+                guard gen == self.generation else { return }
+                do {
+                    if let st = try await self.openStream(gen: gen) {
+                        if gen == self.generation { self.stream = st; self.log("capture restart ok (attempt \(attempt))") }
+                        else { try? await st.stopCapture() }
+                        return
+                    }
+                } catch { self.log("capture restart attempt \(attempt) failed: \(error)") }
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+            }
+            guard gen == self.generation else { return }
+            self.log("capture restart failed 3 times, doing a full restart")
+            self.stop()
+            UserDefaults.standard.set(false, forKey: self.blockedKey)
+            self.scheduleAutoStart(after: 2)
+        }
+    }
+
+    /// While you are using the Mac (mouse moves, typing, scrolling) the captured screen can't stay unchanged,
+    /// because the cursor itself is part of the capture. No frames for a few seconds under those conditions
+    /// means the stream is frozen even though nobody told us, so restart it.
+    private func startWatchdog() {
+        watchdog?.invalidate()
+        sink.markFrame()
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.watchdogTick() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        watchdog = t
+    }
+
+    private func watchdogTick() {
+        guard running, established, !restartingCapture, !asleep else { return }
+        let types: [CGEventType] = [.mouseMoved, .keyDown, .leftMouseDown, .scrollWheel]
+        let sinceInput = types.map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }.min() ?? 999
+        let sinceFrame = CFAbsoluteTimeGetCurrent() - sink.lastFrameTime
+        if sinceInput < 1.5 && sinceFrame > 3 {
+            restartCapture(reason: String(format: "no frames for %.1f s while the Mac is in use", sinceFrame))
+        }
+    }
+
+    /// Display woke (TV turned back on, screen saver ended) or the user session became active again.
+    func displaysDidWake() {
+        guard running, established else { return }
+        log("displays woke")
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            self.restartCapture(reason: "display wake")
         }
     }
 }
@@ -1223,6 +1349,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { Controller.shared.systemDidWake(delay: Double(Settings.shared.cfg.startDelay)) }
+        }
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+            ws.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { Controller.shared.displaysDidWake() }
+            }
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in
