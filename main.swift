@@ -87,6 +87,7 @@ struct Geometry {
     var vw: Int, vh: Int        // virtual screen size in pixels
     var x: Int, y: Int          // offset of the virtual screen from the panel's top-left
     var note: String? = nil     // a warning about the current settings, if any
+    var adjustment: String? = nil   // something the app changed automatically (shown as information, not a warning)
 
     // The black borders that result (what you actually get)
     var borderTop: Int { y }
@@ -152,7 +153,16 @@ func geometry(_ c: Config, panelW pw: Int, panelH ph: Int) -> Geometry {
     }
     x = min(max(x, 0), max(pw - w, 0))
     y = min(max(y, 0), max(ph - h, 0))
-    return Geometry(pw: pw, ph: ph, vw: w, vh: h, x: x, y: y, note: note)
+
+    // macOS will not create a virtual display exactly as wide as the whole panel (found by testing: it fails
+    // whenever the left and right borders are both 0), so always leave 1 px on each side.
+    var adjustment: String?
+    if x == 0 && x + w >= pw {
+        w = even(pw - 2)
+        x = (pw - w) / 2
+        adjustment = "Left and right were both 0, so 1 px was added on each side (macOS will not create a virtual display as wide as the whole panel)."
+    }
+    return Geometry(pw: pw, ph: ph, vw: w, vh: h, x: x, y: y, note: note, adjustment: adjustment)
 }
 
 func equivalentInches(_ c: Config, _ g: Geometry) -> Double {
@@ -275,7 +285,7 @@ final class Controller {
     var autostartBlocked: Bool { UserDefaults.standard.bool(forKey: blockedKey) }
 
     func setStatus(_ s: String) { status = s; onStatusChange?() }
-    private func log(_ s: String) { NSLog("UsableArea: \(s)") }
+    private func log(_ s: String) { NSLog("UsableDisplay: \(s)") }
 
     private func cancel(_ msg: String, gen: Int) {
         guard gen == generation else { return }
@@ -337,7 +347,7 @@ final class Controller {
             if userInitiated {
                 let a = NSAlert()
                 a.messageText = "Screen Recording permission needed"
-                a.informativeText = "Enable UsableArea in System Settings > Privacy & Security > Screen & System Audio Recording, then choose 'Re-apply' from the menu bar icon."
+                a.informativeText = "Enable UsableDisplay in System Settings > Privacy & Security > Screen & System Audio Recording, then choose 'Re-apply' from the menu bar icon."
                 a.runModal()
             }
             return
@@ -666,7 +676,7 @@ final class Controller {
             sc.queueDepth = 5
             sc.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(cfg.refresh))
             let st = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: sc, delegate: nil)
-            try st.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "usablearea.capture"))
+            try st.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "usabledisplay.capture"))
             try await st.startCapture()
             if gen == generation {
                 stream = st
@@ -972,6 +982,10 @@ struct SettingsView: View {
                     Label(n, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(.orange)
                 }
+                if let adj = i.g.adjustment {
+                    Label(adj, systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             } else {
                 Text("No physical display found").foregroundStyle(.secondary)
             }
@@ -1199,7 +1213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             img.isTemplate = true   // adapts to light/dark menu bar
             item.button?.image = img
         } else {
-            item.button?.image = NSImage(systemSymbolName: "rectangle.inset.filled", accessibilityDescription: "UsableArea")
+            item.button?.image = NSImage(systemSymbolName: "rectangle.inset.filled", accessibilityDescription: "UsableDisplay")
         }
         Controller.shared.onStatusChange = { [weak self] in self?.buildMenu() }
         buildMenu()
@@ -1268,12 +1282,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: min(820, vis.width - 40), height: min(800, vis.height - 80)),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
                              backing: .buffered, defer: false)
-            w.title = "UsableArea Settings"
+            w.title = "UsableDisplay Settings"
             w.contentView = host
             w.contentMinSize = NSSize(width: 700, height: 420)
             w.isReleasedWhenClosed = false
-            if !w.setFrameUsingName("UsableAreaSettings2") { w.center() }
-            _ = w.setFrameAutosaveName("UsableAreaSettings2")
+            if !w.setFrameUsingName("UsableDisplaySettings2") { w.center() }
+            _ = w.setFrameAutosaveName("UsableDisplaySettings2")
             settingsWindow = w
         }
         NSApp.activate(ignoringOtherApps: true)
